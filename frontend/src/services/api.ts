@@ -114,6 +114,10 @@ export const coursesApi = {
 export const lecturesApi = {
   updateProgress: (id: string, data: { watched_seconds: number; completed: boolean }) =>
     api.post(`/lectures/${id}/progress`, data),
+  getSummary: (id: string, regenerate: boolean = false) =>
+    api.get(`/lectures/${id}/summary${regenerate ? '?regenerate=true' : ''}`),
+  generateSummary: (id: string) =>
+    api.post(`/lectures/${id}/summary`, { regenerate: true }),
 };
 
 export const quizzesApi = {
@@ -126,13 +130,44 @@ export const quizzesApi = {
 export const usersApi = {
   getProgress: () => api.get('/users/me/progress'),
   getQuizResults: () => api.get('/users/me/quiz-results'),
+  getMastery: () => api.get('/users/me/mastery'),
 };
 
 export const aiApi = {
   chat: (data: { course_id: string; question: string; mode?: string }) =>
     api.post('/ai/chat', data),
+  getHistory: (courseId: string) =>
+    api.get(`/ai/chat/history?course_id=${encodeURIComponent(courseId)}`),
+  clearHistory: (courseId: string) =>
+    api.delete(`/ai/chat/history?course_id=${encodeURIComponent(courseId)}`),
   summarize: (data: { text: string }) => api.post('/ai/summarize', data),
-  generateQuiz: (data: { text: string }) => api.post('/ai/generate-quiz', data),
+  generateQuiz: (data: { course_id?: string; lecture_id?: string; number_of_questions?: number; title?: string; text?: string }) =>
+    api.post('/ai/generate-quiz', data),
   flashcards: (data: { text: string }) => api.post('/ai/flashcards', data),
   studyPlan: (data: { text: string }) => api.post('/ai/study-plan', data),
 };
+
+export const flashcardsApi = {
+  getAll: (params?: { course_id?: string; lecture_id?: string; status?: string }) =>
+    api.get('/flashcards', { params }),
+  generate: (data: { course_id?: string; lecture_id?: string; count?: number; text?: string }) =>
+    api.post('/ai/generate-flashcards', data),
+  review: (id: string, status: 'known' | 'difficult') =>
+    api.post(`/flashcards/${id}/review`, { status }),
+};
+
+export const learningApi = {
+  getProfile: () => api.get('/learning/profile'),
+};
+
+export const studyPlansApi = {
+  get: (courseId?: string) =>
+    api.get(`/study-plans${courseId ? `?course_id=${encodeURIComponent(courseId)}` : ''}`),
+  generate: (data: { course_id: string; target_date?: string; hours_per_day?: number }) =>
+    api.post('/ai/study-plan', data),
+  toggleTask: (planId: string, taskId: string, completed: boolean) =>
+    api.patch(`/study-plans/${planId}/tasks/${taskId}`, { completed }),
+};
+
+
+

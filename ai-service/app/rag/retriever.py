@@ -7,14 +7,15 @@ def retrieve(course_id: str, query: str, k: int = 4):
     qv_str = '[' + ','.join(map(str, qv)) + ']'
     with psycopg.connect(DATABASE_URL) as conn:
         rows = conn.execute(
-            '''SELECT id, lecture_id, chunk_text, embedding <=> %s::vector AS distance 
-               FROM document_chunks 
-               WHERE course_id = %s AND embedding IS NOT NULL 
-               ORDER BY embedding <=> %s::vector LIMIT %s''',
+            '''SELECT dc.id, dc.lecture_id, dc.chunk_text, dc.embedding <=> %s::vector AS distance, l.title 
+               FROM document_chunks dc
+               LEFT JOIN lectures l ON l.id = dc.lecture_id
+               WHERE dc.course_id = %s AND dc.embedding IS NOT NULL 
+               ORDER BY dc.embedding <=> %s::vector LIMIT %s''',
             (qv_str, course_id, qv_str, k)
         ).fetchall()
         if rows:
-            return [{'id': str(r[0]), 'lecture_id': str(r[1]), 'chunk_text': r[2], 'distance': float(r[3])} for r in rows]
+            return [{'id': str(r[0]), 'lecture_id': str(r[1]) if r[1] else None, 'chunk_text': r[2], 'distance': float(r[3]), 'lecture_title': r[4]} for r in rows]
 
         # Fallback to direct lecture transcripts if vector chunks haven't been ingested yet
         fallback = conn.execute(

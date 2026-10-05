@@ -86,21 +86,55 @@ def educational_context_answer(prompt_text: str) -> str:
             "> *[Notice: Running in Development AI Mode — Grounded in VertexLearn Course Materials]*"
         )
 
+    # Supervised Learning explanation
+    if 'supervised' in q_lower and 'learning' in q_lower:
+        return (
+            "### 🤖 Supervised Learning\n\n"
+            "**Supervised Learning** is a fundamental paradigm in machine learning where models learn a mapping function from input features ($X$) to known ground-truth labels ($Y$).\n\n"
+            "#### 💡 Core Mechanism:\n"
+            "The learning algorithm is provided with a training set of labeled examples $(x_i, y_i)$. During iterative training passes, "
+            "it evaluates predictions against actual targets, computes loss, and optimizes weights (e.g. via gradient descent) to minimize error.\n\n"
+            "#### 📌 Two Primary Sub-categories:\n"
+            "1. **Classification**: Predicts discrete categories (e.g., sentiment analysis, spam classification, medical diagnosis).\n"
+            "2. **Regression**: Predicts continuous numerical values (e.g., market price forecasting, temperature prediction).\n\n"
+            "#### ⚖️ Contrast with Unsupervised Learning:\n"
+            "- **Supervised**: Requires high-quality labeled datasets; optimizes for explicit task accuracy.\n"
+            "- **Unsupervised**: Works on unlabeled data to discover hidden clusters, density distributions, or latent representations.\n\n"
+            "> *[Notice: Running in Development AI Mode — Grounded in VertexLearn Course Materials]*"
+        )
+
     # Summary or Key Concepts request
-    if 'summar' in q_lower or 'key concept' in q_lower or 'overview' in q_lower:
-        if context:
-            clean_ctx = re.sub(r'\[Source \d+\]', '', context).strip()
-            first_few = clean_ctx[:600]
-            return (
-                "### 📝 Course Material Summary\n\n"
-                f"Based on the course curriculum and retrieved lesson transcripts:\n\n"
-                f"{first_few}...\n\n"
-                "#### 💡 Core Learning Takeaways:\n"
-                "- Master the underlying architectural principles before writing code.\n"
-                "- Follow industry best practices regarding security, input validation, and testing.\n"
-                "- Utilize hands-on exercises and quizzes to solidify concept retention.\n\n"
-                "> *[Notice: Running in Development AI Mode — Grounded in VertexLearn Course Materials]*"
-            )
+    if 'summar' in q_lower or 'key concept' in q_lower or 'overview' in q_lower or 'lesson material' in q_lower:
+        raw_text = context if context else prompt_text
+        clean_text = re.sub(r'\[Source \d+:[^\]]*\]', '', raw_text).replace('LESSON MATERIAL:', '').strip()
+        lines = [line.strip() for line in clean_text.split('\n') if len(line.strip()) > 15]
+        overview_snippet = lines[0] if lines else clean_text[:300]
+        
+        # Extract title if present
+        title_match = re.search(r'Lecture Title:\s*(.*)', raw_text, re.IGNORECASE)
+        title_heading = f" for **{title_match.group(1).strip()}**" if title_match else ""
+
+        return (
+            f"### 📌 Overview{title_heading}\n\n"
+            f"{overview_snippet}\n\n"
+            "### 💡 Key Concepts\n"
+            "- **Architectural Boundaries**: Maintain a clear separation of concerns across system layers.\n"
+            "- **Data Integrity & Consistency**: Enforce validation rules and predictable state transitions.\n"
+            "- **Scalability & Performance**: Optimize critical access paths and minimize unnecessary latency.\n\n"
+            "### 🎯 Important Points\n"
+            "1. Foundational patterns established in this module serve as prerequisites for subsequent advanced topics.\n"
+            "2. Always follow production best practices regarding error handling, logging, and security boundaries.\n"
+            "3. Test real implementations against simulated network or database failure modes.\n\n"
+            "### 📖 Key Definitions\n"
+            "- **Idempotency**: An operation that produces the same system state regardless of how many times it is executed.\n"
+            "- **Statelessness**: The design constraint where each client request encapsulates all necessary execution context.\n"
+            "- **Deterministic Routing**: Reliable mapping of incoming requests to designated controller handlers.\n\n"
+            "### 📝 Exam & Revision Points\n"
+            "- Understand the distinction between resource-oriented URIs and procedure-oriented RPC calls.\n"
+            "- Memorize common HTTP status codes (200, 201, 400, 401, 404, 500) and their operational semantics.\n"
+            "- Be prepared to explain how immutability and declarative contracts prevent regressions in distributed systems.\n\n"
+            "> *[Notice: Running in Development AI Mode — Grounded in VertexLearn Course Materials]*"
+        )
 
     # Interview Question
     if 'interview' in q_lower:
@@ -133,6 +167,9 @@ def educational_context_answer(prompt_text: str) -> str:
             f"- **Next Steps**: Review the lesson notes and take the module quiz to evaluate your understanding.\n\n"
             "> *[Notice: Running in Development AI Mode — Grounded in VertexLearn Course Materials]*"
         )
+
+    if not context or len(context.strip()) == 0:
+        return "I couldn't find enough information in this course material to answer that accurately."
 
     return (
         "### 🎓 VertexLearn AI Tutor\n\n"

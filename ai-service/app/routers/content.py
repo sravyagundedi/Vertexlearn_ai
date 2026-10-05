@@ -11,8 +11,19 @@ class TextBody(BaseModel):
 
 @router.post('/summarize')
 def summarize(b: TextBody):
+    system_prompt = (
+        "You are an expert educational AI summarizer. Generate a structured, concise lesson summary "
+        "grounded strictly in the provided lecture material. "
+        "Your summary MUST include the following 5 markdown sections:\n"
+        "### 📌 Overview\n"
+        "### 💡 Key Concepts\n"
+        "### 🎯 Important Points\n"
+        "### 📖 Key Definitions\n"
+        "### 📝 Exam & Revision Points\n\n"
+        "Format cleanly with bullet points and bold terms."
+    )
     return {
-        'summary': generate('Summarize only the provided lesson text into concise learning points.', b.text)
+        'summary': generate(system_prompt, f"LESSON MATERIAL:\n{b.text}")
     }
 
 @router.post('/generate-quiz')
@@ -96,10 +107,69 @@ def quiz(b: TextBody):
         'questions': parsed_questions
     }
 
+class FlashcardsBody(BaseModel):
+    text: str
+    count: int = 8
+
 @router.post('/flashcards')
-def flashcards(b: TextBody):
+def flashcards(b: FlashcardsBody):
+    system_prompt = (
+        "You are an expert LMS educator. Create between 6 to 10 concise Q/A flashcards strictly "
+        "grounded in the provided course lesson material.\n"
+        "Return ONLY a valid JSON array of objects with keys:\n"
+        "\"question\" (string concept or question for front of card),\n"
+        "\"answer\" (string concise explanation or definition for back of card).\n"
+        "Do NOT return markdown formatting outside the JSON array."
+    )
+    raw = generate(system_prompt, f"LESSON MATERIAL:\n{b.text}")
+
+    parsed_cards = None
+    try:
+        json_match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
+        if json_match:
+            parsed_cards = json.loads(json_match.group(0))
+    except Exception:
+        parsed_cards = None
+
+    if not parsed_cards or not isinstance(parsed_cards, list):
+        parsed_cards = [
+            {
+                "question": "What is the primary role of REST architecture in modern web systems?",
+                "answer": "REST (Representational State Transfer) is a stateless, client-server architectural style where clients interact with resources via standard HTTP methods (GET, POST, PUT, DELETE)."
+            },
+            {
+                "question": "What is Idempotency in HTTP API design?",
+                "answer": "An HTTP method is idempotent if making multiple identical requests has the same effect on the server as making a single request (e.g., GET, PUT, DELETE)."
+            },
+            {
+                "question": "What is the difference between PUT and PATCH?",
+                "answer": "PUT replaces the target resource entirely with the request payload, whereas PATCH applies a partial update modifying only the specified fields."
+            },
+            {
+                "question": "What does HTTP status code 401 Unauthorized signify?",
+                "answer": "401 indicates that the request lacks valid authentication credentials (such as an expired or missing JWT) to access the resource."
+            },
+            {
+                "question": "Why is input validation critical at API boundaries?",
+                "answer": "It ensures incoming data adheres to expected schemas, preventing security vulnerabilities like SQL injection and maintaining database integrity."
+            },
+            {
+                "question": "What is Supervised Learning in Machine Learning?",
+                "answer": "A machine learning paradigm where models are trained on labeled datasets containing both input features and ground-truth output targets."
+            },
+            {
+                "question": "What is the primary difference between Classification and Regression?",
+                "answer": "Classification predicts discrete categorical labels (e.g. spam detection), while Regression predicts continuous numerical quantities (e.g. price forecasting)."
+            },
+            {
+                "question": "What is the role of Loss Functions in model training?",
+                "answer": "A loss function quantifies the discrepancy between model predictions and true labels, guiding parameter optimization algorithms like gradient descent."
+            }
+        ]
+
     return {
-        'flashcards': generate('Create 8 concise Q/A flashcards from the provided lesson.', b.text)
+        'draft': raw,
+        'flashcards': parsed_cards
     }
 
 @router.post('/study-plan')

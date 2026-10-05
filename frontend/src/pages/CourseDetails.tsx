@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import { api, coursesApi } from '../services/api';
+import { api, coursesApi, lecturesApi, aiApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import VideoPlayer from '../components/VideoPlayer';
 import QuizPlayer from '../components/QuizPlayer';
@@ -18,6 +18,7 @@ import {
   ArrowRight,
   AlertCircle,
   Loader2,
+  RefreshCw,
   Star,
   Clock,
   User,
@@ -30,6 +31,7 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronUp,
+  Layers,
 } from 'lucide-react';
 
 export type QuickCheckItem = {
@@ -130,6 +132,57 @@ export default function CourseDetails() {
   const [isAsking, setIsAsking] = useState(false);
 
   const chatBoxRef = useRef<HTMLDivElement>(null);
+
+  // Summary state for active lecture
+  const [lectureSummary, setLectureSummary] = useState<string>('');
+  const [isSummaryCached, setIsSummaryCached] = useState<boolean>(false);
+  const [isLoadingSummary, setIsLoadingSummary] = useState<boolean>(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [showSummary, setShowSummary] = useState<boolean>(false);
+
+  useEffect(() => {
+    setLectureSummary('');
+    setShowSummary(false);
+    setSummaryError(null);
+  }, [selectedLecture?.id]);
+
+  const handleFetchOrGenerateSummary = async (regenerate: boolean = false) => {
+    if (!selectedLecture?.id || isLoadingSummary) return;
+    setIsLoadingSummary(true);
+    setSummaryError(null);
+    setShowSummary(true);
+    try {
+      const res = await lecturesApi.getSummary(selectedLecture.id, regenerate);
+      setLectureSummary(res.data?.summary || '');
+      setIsSummaryCached(!!res.data?.cached);
+    } catch (err: any) {
+      setSummaryError('Failed to generate summary. Please try again.');
+    } finally {
+      setIsLoadingSummary(false);
+    }
+  };
+
+  const [isGeneratingLectureQuiz, setIsGeneratingLectureQuiz] = useState<boolean>(false);
+  const handleGenerateLectureQuiz = async () => {
+    if (!selectedLecture?.id || isGeneratingLectureQuiz) return;
+    setIsGeneratingLectureQuiz(true);
+    try {
+      const res = await aiApi.generateQuiz({
+        course_id: id,
+        lecture_id: selectedLecture.id,
+        number_of_questions: 5,
+      });
+      const generatedQuizId = res.data?.quiz_id;
+      const generatedTitle = res.data?.title || `AI Quiz: ${selectedLecture.title}`;
+      if (generatedQuizId) {
+        handleOpenQuiz(generatedQuizId, generatedTitle);
+      }
+    } catch (err) {
+      console.error('Failed to generate lecture quiz:', err);
+    } finally {
+      setIsGeneratingLectureQuiz(false);
+    }
+  };
 
   // Auto-scroll chat box when new messages arrive
   useEffect(() => {
@@ -533,7 +586,7 @@ export default function CourseDetails() {
               />
 
               {/* Module Quiz Shortcut if module has a quiz */}
-              {currentModule?.quizzes && currentModule.quizzes.length > 0 && (
+              {currentModule?.quizzes && currentModule.quizzes.length > 0 ? (
                 <div
                   style={{
                     display: 'flex',
@@ -559,14 +612,175 @@ export default function CourseDetails() {
                       </p>
                     </div>
                   </div>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    onClick={() => handleOpenQuiz(currentModule.quizzes![0].id, currentModule.quizzes![0].title)}
-                  >
-                    Take Quiz <ArrowRight size={14} />
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Link
+                      to={`/flashcards?course_id=${course.id}&lecture_id=${selectedLecture.id}`}
+                      className="btn btn-secondary btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <Layers size={13} /> Flashcards
+                    </Link>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleGenerateLectureQuiz}
+                      disabled={isGeneratingLectureQuiz}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      {isGeneratingLectureQuiz ? <Loader2 size={13} className="chat-loading" /> : <Sparkles size={13} />}
+                      {isGeneratingLectureQuiz ? 'Generating AI Quiz...' : 'Generate AI Quiz'}
+                    </button>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => handleOpenQuiz(currentModule.quizzes![0].id, currentModule.quizzes![0].title)}
+                    >
+                      Take Quiz <ArrowRight size={14} />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '12px 20px',
+                    borderRadius: '12px',
+                    background: '#f5f3ff',
+                    border: '1px solid #ddd6fe',
+                    marginBottom: '24px',
+                    flexWrap: 'wrap',
+                    gap: '12px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <Sparkles size={18} color="#7c3aed" />
+                    <div>
+                      <b style={{ fontSize: '13px', color: '#0f172a' }}>Test your retention of this lesson</b>
+                      <p style={{ margin: 0, fontSize: '11px', color: '#64748b' }}>
+                        Generate a 5-question AI quiz or practice interactive 3D flashcards.
+                      </p>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Link
+                      to={`/flashcards?course_id=${course.id}&lecture_id=${selectedLecture.id}`}
+                      className="btn btn-secondary btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <Layers size={13} /> Flashcards
+                    </Link>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={handleGenerateLectureQuiz}
+                      disabled={isGeneratingLectureQuiz}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#7c3aed', borderColor: '#7c3aed' }}
+                    >
+                      {isGeneratingLectureQuiz ? <Loader2 size={13} className="chat-loading" /> : <Sparkles size={13} />}
+                      {isGeneratingLectureQuiz ? 'Generating AI Quiz...' : 'Generate AI Quiz'}
+                    </button>
+                  </div>
                 </div>
               )}
+
+              {/* Concise AI Summary Section */}
+              <div
+                style={{
+                  borderRadius: '14px',
+                  border: '1px solid #e2e8f0',
+                  background: '#ffffff',
+                  padding: '18px 22px',
+                  marginBottom: '24px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: '#fef3c7', color: '#d97706', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Sparkles size={18} />
+                    </div>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <b style={{ fontSize: '15px', color: '#0f172a' }}>Concise AI Summary</b>
+                        {isSummaryCached && showSummary && (
+                          <span style={{ fontSize: '10px', fontWeight: 700, background: '#f0fdf4', color: '#16a34a', padding: '1px 6px', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+                            Saved in Course
+                          </span>
+                        )}
+                      </div>
+                      <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>
+                        5-point synthesis: Overview, Key Concepts, Important Points, Definitions & Revision.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {showSummary && lectureSummary ? (
+                      <>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => handleFetchOrGenerateSummary(true)}
+                          disabled={isLoadingSummary}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                        >
+                          <RefreshCw size={13} className={isLoadingSummary ? 'chat-loading' : ''} />
+                          {isLoadingSummary ? 'Regenerating...' : 'Regenerate'}
+                        </button>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => setShowSummary(false)}
+                        >
+                          Hide
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn btn-teal btn-sm"
+                        onClick={() => handleFetchOrGenerateSummary(false)}
+                        disabled={isLoadingSummary}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                      >
+                        {isLoadingSummary ? <Loader2 size={14} className="chat-loading" /> : <Sparkles size={14} />}
+                        {isLoadingSummary ? 'Generating summary...' : 'Generate Summary'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {showSummary && (
+                  <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #f1f5f9' }}>
+                    {isLoadingSummary ? (
+                      <div style={{ padding: '24px', textAlign: 'center', color: '#0d9488' }}>
+                        <Loader2 size={24} className="chat-loading" style={{ margin: '0 auto 8px' }} />
+                        <p style={{ fontSize: '13px', fontWeight: 600 }}>Generating summary...</p>
+                        <span style={{ fontSize: '12px', color: '#64748b' }}>
+                          Extracting key concepts, definitions, and exam takeaways from transcript...
+                        </span>
+                      </div>
+                    ) : summaryError ? (
+                      <div style={{ padding: '14px 18px', background: '#fef2f2', border: '1px solid #fee2e2', borderRadius: '10px', color: '#dc2626', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: '13px' }}>{summaryError}</span>
+                        <button className="btn btn-primary btn-sm" onClick={() => handleFetchOrGenerateSummary(false)}>
+                          Retry
+                        </button>
+                      </div>
+                    ) : lectureSummary ? (
+                      <div
+                        style={{
+                          whiteSpace: 'pre-wrap',
+                          lineHeight: 1.7,
+                          fontSize: '14px',
+                          color: '#334155',
+                          background: '#f8fafc',
+                          padding: '18px 20px',
+                          borderRadius: '10px',
+                          border: '1px solid #e2e8f0',
+                        }}
+                      >
+                        {lectureSummary}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
 
               {/* Comprehensive Structured Learning Materials Section */}
               <div className="panel" style={{ borderRadius: '16px', border: '1px solid #e2e8f0', background: '#ffffff', padding: '28px', marginBottom: '24px' }}>

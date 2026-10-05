@@ -10,6 +10,11 @@ import {
   X,
   Compass,
   Sparkles,
+  Zap,
+  Clock,
+  Target,
+  Award,
+  FileText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -32,6 +37,13 @@ export default function Layout({ children }: { children: ReactNode }) {
       : [
           ['/dashboard', 'My Learning', LayoutDashboard],
           ['/courses', 'Explore Courses', Compass],
+          ['/ai-tutor', 'AI Tutor', BrainCircuit],
+          ['/quizzes', 'Quizzes', Zap],
+          ['/flashcards', 'Flashcards', Sparkles],
+          ['/summaries', 'Summaries', FileText],
+          ['/study-plan', 'Study Plan', Clock],
+          ['/learning', 'Personalized', Target],
+          ['/progress', 'Mastery & Progress', Award],
         ];
 
   return (

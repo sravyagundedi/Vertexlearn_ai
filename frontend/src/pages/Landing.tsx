@@ -76,48 +76,56 @@ export default function Landing() {
       bg: '#eff6ff',
       title: 'Course-Grounded AI Tutor',
       desc: 'Get precise answers sourced strictly from your lectures and transcripts with exact source citations.',
+      link: '/ai-tutor',
     },
     {
       icon: <Target size={22} color="#0d9488" />,
       bg: '#f0fdfa',
       title: 'Personalized Learning',
       desc: 'Dynamic difficulty adaptation from beginner explanations to deep technical architectural breakdowns.',
+      link: '/learning',
     },
     {
       icon: <Zap size={22} color="#7c3aed" />,
       bg: '#f5f3ff',
       title: 'Automated AI Quizzes',
       desc: 'Instant multiple-choice quizzes generated from your course material to test and reinforce comprehension.',
+      link: '/quizzes',
     },
     {
       icon: <FileText size={22} color="#d97706" />,
       bg: '#fffbeb',
       title: 'Concise AI Summaries',
       desc: 'Transform long lectures and transcripts into clear, actionable bullet points and revision guides.',
+      link: '/summaries',
     },
     {
       icon: <Sparkles size={22} color="#e11d48" />,
       bg: '#fff1f2',
       title: 'Interactive 3D Flashcards',
       desc: 'Practice spaced repetition with flip flashcards automatically synthesized from lesson key concepts.',
+      link: '/flashcards',
     },
     {
       icon: <Clock size={22} color="#0284c7" />,
       bg: '#f0f9ff',
       title: 'Smart Study Plans',
       desc: 'AI-generated personalized study timetables that balance lectures, revision blocks, and practice quizzes.',
+      link: '/study-plan',
     },
     {
       icon: <CheckCircle2 size={22} color="#16a34a" />,
       bg: '#f0fdf4',
       title: 'Progress & Mastery Tracking',
       desc: 'Track lesson completion, quiz accuracy rates, study streaks, and topic-level competency scores.',
+      link: '/progress',
     },
     {
       icon: <ShieldCheck size={22} color="#4f46e5" />,
       bg: '#eef2ff',
       title: 'Curated & Verified Curriculum',
       desc: 'Peer-reviewed content submitted by vetted instructors and approved through administrative governance.',
+      link: '/courses',
     },
   ];
 
@@ -287,13 +295,21 @@ export default function Landing() {
 
         <div className="feature-grid">
           {features.map((f, i) => (
-            <div className="feature-card" key={i}>
+            <Link
+              to={f.link}
+              className="feature-card"
+              key={i}
+              style={{ textDecoration: 'none', color: 'inherit', display: 'flex', flexDirection: 'column', cursor: 'pointer' }}
+            >
               <div className="feature-icon" style={{ backgroundColor: f.bg }}>
                 {f.icon}
               </div>
               <h3>{f.title}</h3>
               <p>{f.desc}</p>
-            </div>
+              <span style={{ marginTop: 'auto', paddingTop: '14px', fontSize: '13px', fontWeight: 700, color: '#2563eb', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                Open Feature <ArrowRight size={14} />
+              </span>
+            </Link>
           ))}
         </div>
       </section>

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS lectures (
   title VARCHAR(200) NOT NULL, video_url TEXT, transcript TEXT, duration_seconds INT DEFAULT 0,
   order_index INT NOT NULL, resource_urls TEXT[] DEFAULT '{}',
   description TEXT, learning_objectives TEXT[] DEFAULT '{}', notes TEXT,
-  key_concepts TEXT[] DEFAULT '{}', quick_check JSONB DEFAULT '[]'::jsonb
+  key_concepts TEXT[] DEFAULT '{}', quick_check JSONB DEFAULT '[]'::jsonb,
+  ai_summary TEXT
 );
 CREATE TABLE IF NOT EXISTS enrollments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -96,7 +97,8 @@ CREATE TABLE IF NOT EXISTS ai_chat_sessions (id UUID PRIMARY KEY DEFAULT gen_ran
 CREATE TABLE IF NOT EXISTS ai_chat_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), session_id UUID REFERENCES ai_chat_sessions(id) ON DELETE CASCADE, sender VARCHAR(10), content TEXT, source_lecture_ids UUID[], created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS document_chunks (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), course_id UUID REFERENCES courses(id) ON DELETE CASCADE, lecture_id UUID REFERENCES lectures(id) ON DELETE CASCADE, chunk_text TEXT, embedding VECTOR(1536), created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS study_plans (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), course_id UUID REFERENCES courses(id), plan_json JSONB, generated_at TIMESTAMPTZ DEFAULT now());
-CREATE TABLE IF NOT EXISTS flashcards (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), module_id UUID REFERENCES modules(id), question TEXT, answer TEXT);
+CREATE TABLE IF NOT EXISTS flashcards (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), course_id UUID REFERENCES courses(id) ON DELETE CASCADE, module_id UUID REFERENCES modules(id), lecture_id UUID REFERENCES lectures(id) ON DELETE CASCADE, question TEXT, answer TEXT, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS user_flashcard_reviews (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id) ON DELETE CASCADE, flashcard_id UUID REFERENCES flashcards(id) ON DELETE CASCADE, status VARCHAR(20) NOT NULL, reviewed_at TIMESTAMPTZ DEFAULT now(), UNIQUE(user_id, flashcard_id));
 CREATE TABLE IF NOT EXISTS recommendations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), recommended_course_id UUID REFERENCES courses(id), reason TEXT, score NUMERIC(5,2), created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS discussion_threads (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), course_id UUID REFERENCES courses(id), created_by UUID REFERENCES users(id), title VARCHAR(200), created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS discussion_posts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), thread_id UUID REFERENCES discussion_threads(id) ON DELETE CASCADE, user_id UUID REFERENCES users(id), content TEXT, is_flagged BOOLEAN DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now());

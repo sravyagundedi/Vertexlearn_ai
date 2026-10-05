@@ -12,6 +12,9 @@ export function signRefresh(user:any){
 export function verifyRefresh(token:string){
     return jwt.verify(token,process.env.JWT_REFRESH_SECRET||'dev-refresh') as any;
 }
+export function verifyAccess(token:string){
+    return jwt.verify(token,secret()) as any;
+}
 export function requireAuth(req:AuthRequest,res:Response,next:NextFunction){
     const h=req.headers.authorization;
     if(!h?.startsWith('Bearer '))return res.status(401).json({error:{code:'UNAUTHORIZED',message:'Authentication required'}});
@@ -27,3 +30,17 @@ export const requireRole=(...roles:Role[])=>(req:AuthRequest,res:Response,next:N
     if(!req.user||!roles.includes(req.user.role))return res.status(403).json({error:{code:'FORBIDDEN',message:'Insufficient role'}});
     next();
 };
+
+export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunction) {
+    const h = req.headers.authorization;
+    if (h?.startsWith('Bearer ')) {
+        try {
+            const decoded = verifyAccess(h.slice(7));
+            req.user = { id: decoded.id || decoded.sub, role: decoded.role, email: decoded.email };
+        } catch {
+            // Unauthenticated view is fine for optional auth
+        }
+    }
+    next();
+}
+
