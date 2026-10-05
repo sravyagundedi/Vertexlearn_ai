@@ -27,6 +27,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-this-refresh-in-production}
       AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-service:8001}
+    volumes:
+      - ./backend/src:/app/src
     ports: ["8000:8000"]
     depends_on:
       db: { condition: service_healthy }
@@ -41,6 +43,8 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+    volumes:
+      - ./ai-service/app:/app/app
     ports: ["8001:8001"]
     depends_on:
       db: { condition: service_healthy }
@@ -50,6 +54,9 @@ services:
     build: ./frontend
     environment:
       VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
     ports: ["5173:5173"]
     depends_on: [backend]
     command: npm run dev -- --host 0.0.0.0

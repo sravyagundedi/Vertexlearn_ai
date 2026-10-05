@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS modules (
 CREATE TABLE IF NOT EXISTS lectures (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), module_id UUID REFERENCES modules(id) ON DELETE CASCADE,
   title VARCHAR(200) NOT NULL, video_url TEXT, transcript TEXT, duration_seconds INT DEFAULT 0,
-  order_index INT NOT NULL, resource_urls TEXT[] DEFAULT '{}'
+  order_index INT NOT NULL, resource_urls TEXT[] DEFAULT '{}',
+  description TEXT, learning_objectives TEXT[] DEFAULT '{}', notes TEXT,
+  key_concepts TEXT[] DEFAULT '{}', quick_check JSONB DEFAULT '[]'::jsonb
 );
 CREATE TABLE IF NOT EXISTS enrollments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -59,11 +61,14 @@ CREATE TABLE IF NOT EXISTS assignment_submissions (
 );
 CREATE TABLE IF NOT EXISTS quizzes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), module_id UUID REFERENCES modules(id) ON DELETE CASCADE,
-  title VARCHAR(200), is_ai_generated BOOLEAN DEFAULT FALSE, generated_from_lecture_id UUID REFERENCES lectures(id)
+  course_id UUID REFERENCES courses(id) ON DELETE CASCADE, lecture_id UUID REFERENCES lectures(id) ON DELETE CASCADE,
+  title VARCHAR(200), description TEXT, difficulty VARCHAR(20) DEFAULT 'intermediate', passing_score INT DEFAULT 70,
+  is_ai_generated BOOLEAN DEFAULT FALSE, generated_from_lecture_id UUID REFERENCES lectures(id)
 );
 CREATE TABLE IF NOT EXISTS quiz_questions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), quiz_id UUID REFERENCES quizzes(id) ON DELETE CASCADE,
-  question_text TEXT, question_type VARCHAR(20), order_index INT
+  question_text TEXT, question_type VARCHAR(20) DEFAULT 'mcq', order_index INT,
+  explanation TEXT, points INT DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS quiz_options (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), question_id UUID REFERENCES quiz_questions(id) ON DELETE CASCADE,
@@ -71,7 +76,10 @@ CREATE TABLE IF NOT EXISTS quiz_options (
 );
 CREATE TABLE IF NOT EXISTS quiz_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), quiz_id UUID REFERENCES quizzes(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES users(id) ON DELETE CASCADE, score NUMERIC(5,2), started_at TIMESTAMPTZ DEFAULT now(), submitted_at TIMESTAMPTZ
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE, score NUMERIC(5,2),
+  total_questions INT DEFAULT 0, correct_answers INT DEFAULT 0,
+  percentage NUMERIC(5,2) DEFAULT 0, passed BOOLEAN DEFAULT FALSE,
+  started_at TIMESTAMPTZ DEFAULT now(), submitted_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS quiz_answers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), attempt_id UUID REFERENCES quiz_attempts(id) ON DELETE CASCADE,

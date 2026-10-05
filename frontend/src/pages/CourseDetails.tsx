@@ -1,7 +1,10 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { api } from '../services/api';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { api, coursesApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import VideoPlayer from '../components/VideoPlayer';
+import QuizPlayer from '../components/QuizPlayer';
+import { DifficultyBadge } from '../components/Badge';
 import {
   BookOpen,
   CheckCircle2,
@@ -12,33 +15,66 @@ import {
   Send,
   Sparkles,
   ArrowLeft,
+  ArrowRight,
   AlertCircle,
   Loader2,
   Star,
   Clock,
   User,
   Check,
+  Award,
+  HelpCircle,
+  ListChecks,
+  FileText,
+  Lightbulb,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
-type Lecture = {
+export type QuickCheckItem = {
+  question: string;
+  options: string[];
+  answer: number;
+  explanation: string;
+};
+
+export type Lecture = {
   id: string;
+  module_id: string;
   title: string;
   video_url?: string;
   transcript?: string;
   duration_seconds?: number;
   order_index: number;
   moduleTitle?: string;
+  description?: string;
+  learning_objectives?: string[];
+  notes?: string;
+  key_concepts?: string[];
+  quick_check?: QuickCheckItem[];
+  completed?: boolean;
 };
 
-type Module = {
+export type QuizSummary = {
+  id: string;
+  title: string;
+  description?: string;
+  difficulty?: string;
+  passing_score?: number;
+  total_questions?: number;
+};
+
+export type Module = {
   id: string;
   course_id: string;
   title: string;
   order_index: number;
   lectures: Lecture[];
+  quizzes?: QuizSummary[];
 };
 
-type Course = {
+export type Course = {
   id: string;
   instructor_id: string;
   title: string;
@@ -53,7 +89,7 @@ type Course = {
   modules: Module[];
 };
 
-type ChatMessage = {
+export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
@@ -63,78 +99,89 @@ type ChatMessage = {
 
 export default function CourseDetails() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
 
   const [course, setCourse] = useState<Course | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Active view: 'lesson' | 'quiz'
+  const [activeView, setActiveView] = useState<'lesson' | 'quiz'>('lesson');
+  const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
+  const [activeQuizTitle, setActiveQuizTitle] = useState<string>('');
+
   const [selectedLecture, setSelectedLecture] = useState<Lecture | null>(null);
-  const [completedLectures, setCompletedLectures] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem(`vertexlearn_completed_${id}`);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [completedLectures, setCompletedLectures] = useState<Set<string>>(new Set());
 
   const [isEnrolled, setIsEnrolled] = useState(false);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [isEnrolling, setIsEnrolling] = useState(false);
   const [isUpdatingProgress, setIsUpdatingProgress] = useState(false);
 
+  // Quick check state for active lecture: index -> selected option index
+  const [quickCheckAnswers, setQuickCheckAnswers] = useState<Record<number, number>>({});
+  const [showQuickCheckExpl, setShowQuickCheckExpl] = useState<Record<number, boolean>>({});
+
   // AI Tutor chat states
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState('');
   const [mode, setMode] = useState('intermediate');
   const [isAsking, setIsAsking] = useState(false);
-  const [askError, setAskError] = useState<string | null>(null);
 
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll chat box when new messages arrive or loading state changes
+  // Auto-scroll chat box when new messages arrive
   useEffect(() => {
     if (chatBoxRef.current) {
       chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
     }
   }, [messages, isAsking]);
 
-  // Load course details and enrollment status
-  useEffect(() => {
+  // Load course details
+  const fetchCourseData = async () => {
     if (!id) return;
-    setLoading(true);
-    setError(null);
+    try {
+      const res = await api.get(`/courses/${id}`);
+      const courseData: Course = res.data;
+      setCourse(courseData);
 
-    api
-      .get(`/courses/${id}`)
-      .then((r) => {
-        setCourse(r.data);
-        // Default selected lecture to the first lecture of the first module
-        if (r.data.modules?.length > 0 && r.data.modules[0].lectures?.length > 0) {
-          const firstLecture = r.data.modules[0].lectures[0];
-          setSelectedLecture({
-            ...firstLecture,
-            moduleTitle: r.data.modules[0].title,
-          });
+      // Collect completed lectures from lectures data
+      const completedSet = new Set<string>();
+      courseData.modules?.forEach((m) => {
+        m.lectures?.forEach((l) => {
+          if (l.completed) completedSet.add(l.id);
+        });
+      });
+      setCompletedLectures(completedSet);
+
+      // Handle default selected lecture
+      const allL = courseData.modules?.flatMap((m) =>
+        m.lectures.map((l) => ({ ...l, moduleTitle: m.title }))
+      ) || [];
+
+      const queryLectureId = searchParams.get('lecture');
+      if (queryLectureId) {
+        const found = allL.find((l) => l.id === queryLectureId);
+        if (found) {
+          setSelectedLecture(found);
+        } else if (allL.length > 0) {
+          setSelectedLecture(allL[0]);
         }
-      })
-      .catch((err) => {
-        console.error('Failed to load course', err);
-        setError(
-          err.response?.data?.error?.message ||
-            'Unable to load course details. Please verify the URL and try again.'
-        );
-      })
-      .finally(() => setLoading(false));
-
-    // Check enrollment for student
-    if (user?.role === 'student') {
-      checkEnrollment();
+      } else if (!selectedLecture && allL.length > 0) {
+        // Try to pick first uncompleted lecture or first lecture
+        const firstUncompleted = allL.find((l) => !completedSet.has(l.id)) || allL[0];
+        setSelectedLecture(firstUncompleted);
+      }
+    } catch (err: any) {
+      console.error('Failed to load course', err);
+      setError(err.response?.data?.error?.message || 'Unable to load course details.');
+    } finally {
+      setLoading(false);
     }
-  }, [id, user]);
+  };
 
-  const checkEnrollment = async () => {
+  const checkEnrollmentStatus = async () => {
     try {
       const res = await api.get('/enrollments/me');
       const enrollment = res.data?.find((e: any) => e.course_id === id);
@@ -144,12 +191,27 @@ export default function CourseDetails() {
       } else {
         setIsEnrolled(false);
       }
-    } catch (err) {
-      console.error('Failed to fetch enrollment status', err);
+    } catch {
+      // Ignore auth or network errors on check
     }
   };
 
-  // Flatten all lectures across all modules for sequential navigation
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    fetchCourseData();
+    if (user?.role === 'student') {
+      checkEnrollmentStatus();
+    }
+  }, [id, user]);
+
+  // Reset quick check answers when lecture changes
+  useEffect(() => {
+    setQuickCheckAnswers({});
+    setShowQuickCheckExpl({});
+  }, [selectedLecture?.id]);
+
+  // Flatten all lectures for sequential navigation
   const allLectures: Lecture[] = useMemo(() => {
     if (!course?.modules) return [];
     return course.modules.flatMap((m) =>
@@ -171,14 +233,21 @@ export default function CourseDetails() {
       ? allLectures[currentIndex + 1]
       : null;
 
+  // Find module for active lecture to check if module has a quiz
+  const currentModule = useMemo(() => {
+    if (!course?.modules || !selectedLecture) return null;
+    return course.modules.find((m) => m.id === selectedLecture.module_id) || null;
+  }, [course, selectedLecture]);
+
   // Handle Enrollment
   const handleEnroll = async () => {
     if (!id || isEnrolling) return;
     setIsEnrolling(true);
     try {
-      await api.post(`/courses/${id}/enroll`);
+      await coursesApi.enroll(id);
       setIsEnrolled(true);
-      await checkEnrollment();
+      await checkEnrollmentStatus();
+      await fetchCourseData();
     } catch (err: any) {
       alert(err.response?.data?.error?.message || 'Enrollment failed. Please try again.');
     } finally {
@@ -189,44 +258,44 @@ export default function CourseDetails() {
   // Toggle lecture completion
   const handleToggleComplete = async () => {
     if (!selectedLecture || isUpdatingProgress) return;
-    const isCompleted = completedLectures.includes(selectedLecture.id);
+    const isCompleted = completedLectures.has(selectedLecture.id);
     const nextCompleted = !isCompleted;
     setIsUpdatingProgress(true);
 
     try {
-      await api.post(`/lectures/${selectedLecture.id}/progress`, {
+      const res = await api.post(`/lectures/${selectedLecture.id}/progress`, {
         watched_seconds: selectedLecture.duration_seconds || 0,
         completed: nextCompleted,
       });
 
-      const updated = nextCompleted
-        ? [...completedLectures, selectedLecture.id]
-        : completedLectures.filter((cid) => cid !== selectedLecture.id);
+      // Update state immediately
+      setCompletedLectures((prev) => {
+        const next = new Set(prev);
+        if (nextCompleted) next.add(selectedLecture.id);
+        else next.delete(selectedLecture.id);
+        return next;
+      });
 
-      setCompletedLectures(updated);
-      try {
-        localStorage.setItem(`vertexlearn_completed_${id}`, JSON.stringify(updated));
-      } catch {
-        // Ignore storage errors
+      if (res.data?.progress_percent !== undefined) {
+        setProgressPercent(res.data.progress_percent);
+      } else {
+        await checkEnrollmentStatus();
       }
-
-      // Refresh enrollment progress
-      if (user?.role === 'student') {
-        await checkEnrollment();
-      }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to update lecture progress', err);
-      // Even if offline or not enrolled yet, update locally for interactive feel
-      const updated = nextCompleted
-        ? [...completedLectures, selectedLecture.id]
-        : completedLectures.filter((cid) => cid !== selectedLecture.id);
-      setCompletedLectures(updated);
+      // Fallback local update
+      setCompletedLectures((prev) => {
+        const next = new Set(prev);
+        if (nextCompleted) next.add(selectedLecture.id);
+        else next.delete(selectedLecture.id);
+        return next;
+      });
     } finally {
       setIsUpdatingProgress(false);
     }
   };
 
-  // Handle AI Tutor chat question
+  // Handle AI Tutor question
   async function ask(queryText?: string) {
     const textToSend = (queryText || question).trim();
     if (!textToSend || isAsking || !id) return;
@@ -241,7 +310,6 @@ export default function CourseDetails() {
     setMessages((prev) => [...prev, userMsg]);
     setQuestion('');
     setIsAsking(true);
-    setAskError(null);
 
     try {
       const r = await api.post('/ai/chat', {
@@ -253,24 +321,19 @@ export default function CourseDetails() {
       const aiMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        text: r.data?.reply || 'No reply generated.',
+        text: r.data?.reply || 'No answer generated.',
         sources: r.data?.sources || [],
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, aiMsg]);
     } catch (err: any) {
       console.error('AI Tutor request failed', err);
-      const errMsg =
-        err.response?.data?.error?.message ||
-        err.response?.data?.detail ||
-        'Unable to reach AI Tutor. Please verify your connection or try again later.';
-      setAskError(errMsg);
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          text: `I encountered an issue retrieving an answer: ${errMsg}`,
+          text: 'AI Tutor is temporarily unavailable. Please verify your connection or try again in a moment.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -279,16 +342,38 @@ export default function CourseDetails() {
     }
   }
 
-  // Quick suggestion chips
-  const promptSuggestions = [
-    'Summarize this course',
-    'Explain key concepts simply',
-    'What should I know before starting?',
-    'Give me a practice quiz question',
-  ];
+  // Quick action suggestions
+  const handleQuickAction = (action: string) => {
+    const lectureTitle = selectedLecture?.title || course?.title || 'this topic';
+    switch (action) {
+      case 'explain':
+        ask(`Explain ${lectureTitle} simply with an everyday analogy.`);
+        break;
+      case 'example':
+        ask(`Give me a practical code example for ${lectureTitle}.`);
+        break;
+      case 'summarize':
+        ask(`Summarize the core takeaways of ${lectureTitle}.`);
+        break;
+      case 'quiz_me':
+        ask(`Quiz me on ${lectureTitle} with a multiple-choice question.`);
+        break;
+      case 'interview':
+        ask(`What is a common technical interview question regarding ${lectureTitle}?`);
+        break;
+      default:
+        ask(action);
+    }
+  };
+
+  const handleOpenQuiz = (quizId: string, quizTitle: string) => {
+    setActiveQuizId(quizId);
+    setActiveQuizTitle(quizTitle);
+    setActiveView('quiz');
+  };
 
   if (loading) {
-    return <div className="loading">Loading course…</div>;
+    return <div className="loading">Loading VertexLearn Course...</div>;
   }
 
   if (error || !course) {
@@ -310,324 +395,740 @@ export default function CourseDetails() {
   }
 
   const isLectureCompleted = selectedLecture
-    ? completedLectures.includes(selectedLecture.id)
+    ? completedLectures.has(selectedLecture.id)
     : false;
 
   return (
     <section>
-      {/* Top Breadcrumb */}
-      <Link to="/courses" className="back-link">
-        <ArrowLeft size={16} /> Back to Courses
+      {/* Top Breadcrumb & Course Header */}
+      <Link to="/courses" className="back-link" style={{ marginBottom: '14px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <ArrowLeft size={16} /> Back to Courses Catalog
       </Link>
 
-      {/* Course Header */}
-      <header className="top">
+      <header className="top" style={{ marginBottom: '20px' }}>
         <div>
-          <span className="eyebrow">COURSE PLAYER</span>
-          <h1>{course.title}</h1>
-          <p className="muted">{course.description}</p>
-          <div className="course-header-meta">
-            <span>
+          <span className="eyebrow">COURSE LEARNING EXPERIENCE</span>
+          <h1 style={{ margin: '4px 0 8px' }}>{course.title}</h1>
+          <p className="muted" style={{ margin: '0 0 12px', maxWidth: '800px', lineHeight: 1.5 }}>
+            {course.description}
+          </p>
+          <div className="course-header-meta" style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'center' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
               <User size={14} /> {course.instructor || 'Instructor'}
             </span>
-            <span>
-              <Star size={14} fill="currentColor" color="#d28a00" /> {course.rating}
+            <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+              <Star size={14} fill="currentColor" color="#d97706" /> {course.rating}
             </span>
             <span className="tag">{course.category}</span>
-            <span className="tag">{course.difficulty}</span>
-            <span>
+            <DifficultyBadge difficulty={course.difficulty} />
+            <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
               <Clock size={14} /> {allLectures.length} lessons
             </span>
           </div>
         </div>
       </header>
 
-      {/* Enrollment & Progress Banner */}
+      {/* Student Enrollment Progress Banner */}
       {user?.role === 'student' && (
-        <div className="enroll-bar">
-          <div className="enroll-bar-content">
+        <div
+          className="enroll-bar"
+          style={{
+            background: isEnrolled ? '#ffffff' : '#f0f9ff',
+            border: isEnrolled ? '1px solid #e2e8f0' : '1px solid #bae6fd',
+            borderRadius: '14px',
+            padding: '16px 20px',
+            marginBottom: '24px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '16px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+          }}
+        >
+          <div style={{ flex: '1 1 300px' }}>
             {isEnrolled ? (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <b>Your Learning Progress</b>
-                  <span className="enroll-badge">
-                    <Check size={14} /> Enrolled
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '13px', fontWeight: 700, color: '#0f172a' }}>
+                      Your Course Progress
+                    </span>
+                    <span style={{ fontSize: '11px', fontWeight: 700, background: '#dcfce7', color: '#15803d', padding: '2px 8px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <Check size={12} /> Enrolled
+                    </span>
+                  </div>
+                  <span style={{ fontSize: '13px', fontWeight: 800, color: '#0d9488' }}>
+                    {progressPercent}% Complete ({completedLectures.size} / {allLectures.length} lessons)
                   </span>
                 </div>
-                <div className="progress">
-                  <i style={{ width: `${progressPercent}%` }} />
+                <div className="progress" style={{ height: '8px' }}>
+                  <i style={{ width: `${progressPercent}%`, backgroundColor: '#0d9488' }} />
                 </div>
-                <p>{progressPercent}% course completed</p>
               </>
             ) : (
-              <>
-                <b>Ready to start learning?</b>
-                <p>Enroll now to track your progress, bookmark lectures, and complete quizzes.</p>
-              </>
+              <div>
+                <b style={{ fontSize: '14px', color: '#0369a1' }}>Ready to start learning?</b>
+                <p style={{ fontSize: '12px', color: '#64748b', margin: '4px 0 0' }}>
+                  Enroll now to track lesson completions, take module quizzes, and view progress on your dashboard.
+                </p>
+              </div>
             )}
           </div>
+
           {!isEnrolled && (
             <button
-              className="primary"
+              className="btn btn-primary"
               onClick={handleEnroll}
               disabled={isEnrolling}
             >
-              {isEnrolling ? 'Enrolling...' : 'Enroll in Course'}
+              {isEnrolling ? 'Enrolling...' : 'Enroll Free in Course'}
             </button>
           )}
         </div>
       )}
 
-      {/* Main 2-Column Course Layout */}
-      <div className="course-layout">
-        {/* Left Column: Player & Curriculum */}
+      {/* Main 3-Column Responsive Course Player Grid */}
+      <div className="course-layout" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '24px', alignItems: 'start' }}>
+        {/* Left / Center Area: Video Player, Quiz Player & Structured Learning Materials */}
         <div>
-          {/* Active Lecture Player Card */}
-          {selectedLecture && (
-            <div className="lecture-player-card">
-              <div className="player-screen">
-                {selectedLecture.video_url ? (
-                  selectedLecture.video_url.includes('youtube.com') ||
-                  selectedLecture.video_url.includes('youtu.be') ? (
-                    <iframe
-                      className="video-frame"
-                      src={
-                        selectedLecture.video_url.includes('watch?v=')
-                          ? selectedLecture.video_url.replace('watch?v=', 'embed/')
-                          : selectedLecture.video_url
-                      }
-                      title={selectedLecture.title}
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                      allowFullScreen
-                    />
-                  ) : (
-                    <video
-                      className="video-frame"
-                      controls
-                      src={selectedLecture.video_url}
-                    />
-                  )
-                ) : (
-                  <div className="lesson-screen-placeholder">
-                    <PlayCircle size={46} opacity={0.85} />
-                    <h3>{selectedLecture.title}</h3>
-                    <p>
-                      {selectedLecture.moduleTitle
-                        ? `${selectedLecture.moduleTitle} · `
-                        : ''}
-                      Interactive lesson content. Follow along with course notes and query the AI
-                      Tutor for explanations on this material.
-                    </p>
-                  </div>
-                )}
+          {activeView === 'quiz' && activeQuizId ? (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setActiveView('lesson')}
+                >
+                  <ArrowLeft size={14} /> Back to Lesson
+                </button>
+                <span style={{ fontSize: '13px', color: '#64748b' }}>
+                  Taking Quiz: <b>{activeQuizTitle}</b>
+                </span>
               </div>
+              <QuizPlayer
+                quizId={activeQuizId}
+                quizTitle={activeQuizTitle}
+                onComplete={() => {
+                  fetchCourseData();
+                  checkEnrollmentStatus();
+                }}
+                onClose={() => setActiveView('lesson')}
+              />
+            </div>
+          ) : selectedLecture ? (
+            <div>
+              {/* Reusable Video Player */}
+              <VideoPlayer
+                title={selectedLecture.title}
+                videoUrl={selectedLecture.video_url}
+                durationSeconds={selectedLecture.duration_seconds}
+                moduleTitle={selectedLecture.moduleTitle}
+                isCompleted={isLectureCompleted}
+                isUpdatingProgress={isUpdatingProgress}
+                onToggleComplete={handleToggleComplete}
+                onPrev={() => prevLecture && setSelectedLecture(prevLecture)}
+                onNext={() => nextLecture && setSelectedLecture(nextLecture)}
+                hasPrev={!!prevLecture}
+                hasNext={!!nextLecture}
+              />
 
-              {/* Lecture Title & Controls */}
-              <div className="player-toolbar">
-                <div>
-                  <h3 style={{ margin: '0 0 4px', fontSize: '17px' }}>
-                    {selectedLecture.title}
-                  </h3>
-                  <small style={{ color: '#78859b' }}>
-                    {selectedLecture.moduleTitle && `${selectedLecture.moduleTitle} • `}
-                    {Math.round((selectedLecture.duration_seconds || 0) / 60)} min
-                  </small>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {/* Module Quiz Shortcut if module has a quiz */}
+              {currentModule?.quizzes && currentModule.quizzes.length > 0 && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '14px 20px',
+                    borderRadius: '12px',
+                    background: 'linear-gradient(135deg, #eff6ff, #f0fdf4)',
+                    border: '1px solid #bfdbfe',
+                    marginBottom: '24px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: '#2563eb', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Award size={18} />
+                    </div>
+                    <div>
+                      <b style={{ fontSize: '14px', color: '#0f172a' }}>
+                        {currentModule.quizzes[0].title}
+                      </b>
+                      <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>
+                        Test your retention of {currentModule.title}. ({currentModule.quizzes[0].total_questions || 3} questions)
+                      </p>
+                    </div>
+                  </div>
                   <button
-                    className={`btn-complete ${isLectureCompleted ? 'completed' : ''}`}
-                    onClick={handleToggleComplete}
-                    disabled={isUpdatingProgress}
-                    title="Toggle lecture completion"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => handleOpenQuiz(currentModule.quizzes![0].id, currentModule.quizzes![0].title)}
                   >
-                    {isLectureCompleted ? (
-                      <>
-                        <Check size={14} /> Completed
-                      </>
-                    ) : (
-                      <>
-                        <Circle size={14} /> Mark as Complete
-                      </>
-                    )}
+                    Take Quiz <ArrowRight size={14} />
+                  </button>
+                </div>
+              )}
+
+              {/* Comprehensive Structured Learning Materials Section */}
+              <div className="panel" style={{ borderRadius: '16px', border: '1px solid #e2e8f0', background: '#ffffff', padding: '28px', marginBottom: '24px' }}>
+                {/* 1. ABOUT THIS LESSON */}
+                <section style={{ marginBottom: '28px' }}>
+                  <h3 style={{ fontSize: '13px', fontWeight: 800, color: '#2563eb', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <FileText size={16} /> About This Lesson
+                  </h3>
+                  <p style={{ fontSize: '14px', color: '#334155', lineHeight: 1.6, margin: 0 }}>
+                    {selectedLecture.description ||
+                      'In this class, you will explore core design principles, practical implementation workflows, and architectural best practices.'}
+                  </p>
+                </section>
+
+                {/* 2. LEARNING OBJECTIVES */}
+                {selectedLecture.learning_objectives && selectedLecture.learning_objectives.length > 0 && (
+                  <section style={{ marginBottom: '28px', background: '#f8fafc', padding: '18px 20px', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
+                    <h3 style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <ListChecks size={16} color="#0d9488" /> Learning Objectives
+                    </h3>
+                    <p style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px' }}>
+                      By the end of this lesson, you will be able to:
+                    </p>
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {selectedLecture.learning_objectives.map((obj, i) => (
+                        <li key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', fontSize: '13px', color: '#334155' }}>
+                          <CheckCircle2 size={16} color="#0d9488" style={{ flexShrink: 0, marginTop: '2px' }} />
+                          <span>{obj}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                {/* 3. LESSON NOTES */}
+                <section style={{ marginBottom: '28px' }}>
+                  <h3 style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <BookOpen size={16} color="#2563eb" /> Lesson Notes & Deep Dive
+                  </h3>
+                  <div
+                    style={{
+                      fontSize: '14px',
+                      color: '#334155',
+                      lineHeight: 1.7,
+                      whiteSpace: 'pre-wrap',
+                      background: '#ffffff',
+                    }}
+                  >
+                    {selectedLecture.notes || selectedLecture.transcript || 'Review the lecture video and query the AI Tutor for in-depth explanations on this topic.'}
+                  </div>
+                </section>
+
+                {/* 4. KEY CONCEPTS */}
+                {selectedLecture.key_concepts && selectedLecture.key_concepts.length > 0 && (
+                  <section style={{ marginBottom: '28px' }}>
+                    <h3 style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Lightbulb size={16} color="#f59e0b" /> Key Concepts
+                    </h3>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                      {selectedLecture.key_concepts.map((concept, idx) => (
+                        <span
+                          key={idx}
+                          style={{
+                            padding: '6px 12px',
+                            borderRadius: '8px',
+                            background: '#f1f5f9',
+                            border: '1px solid #cbd5e1',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#1e293b',
+                          }}
+                        >
+                          {concept}
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* 5. QUICK CHECK */}
+                {selectedLecture.quick_check && selectedLecture.quick_check.length > 0 && (
+                  <section style={{ marginBottom: '28px', borderTop: '1px solid #e2e8f0', paddingTop: '24px' }}>
+                    <h3 style={{ fontSize: '13px', fontWeight: 800, color: '#0d9488', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <CheckCircle2 size={16} /> Quick Understanding Check
+                    </h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      {selectedLecture.quick_check.map((qc, qIdx) => {
+                        const userChoice = quickCheckAnswers[qIdx];
+                        const hasAnswered = userChoice !== undefined;
+                        const isCorrect = userChoice === qc.answer;
+
+                        return (
+                          <div
+                            key={qIdx}
+                            style={{
+                              padding: '16px 20px',
+                              borderRadius: '12px',
+                              background: '#f8fafc',
+                              border: '1px solid #e2e8f0',
+                            }}
+                          >
+                            <p style={{ fontWeight: 700, fontSize: '14px', margin: '0 0 12px', color: '#0f172a' }}>
+                              {qIdx + 1}. {qc.question}
+                            </p>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              {qc.options.map((optText, oIdx) => {
+                                const isSelected = userChoice === oIdx;
+                                let optBg = '#ffffff';
+                                let optBorder = '#cbd5e1';
+
+                                if (hasAnswered) {
+                                  if (oIdx === qc.answer) {
+                                    optBg = '#dcfce7';
+                                    optBorder = '#86efac';
+                                  } else if (isSelected && !isCorrect) {
+                                    optBg = '#fee2e2';
+                                    optBorder = '#fca5a5';
+                                  }
+                                }
+
+                                return (
+                                  <button
+                                    key={oIdx}
+                                    type="button"
+                                    onClick={() => {
+                                      setQuickCheckAnswers((p) => ({ ...p, [qIdx]: oIdx }));
+                                      setShowQuickCheckExpl((p) => ({ ...p, [qIdx]: true }));
+                                    }}
+                                    style={{
+                                      textAlign: 'left',
+                                      padding: '10px 14px',
+                                      borderRadius: '8px',
+                                      background: optBg,
+                                      border: `1px solid ${optBorder}`,
+                                      fontSize: '13px',
+                                      fontWeight: isSelected ? 600 : 400,
+                                      cursor: 'pointer',
+                                      transition: 'all 0.15s ease',
+                                    }}
+                                  >
+                                    {String.fromCharCode(65 + oIdx)}. {optText}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            {/* Explanation reveal */}
+                            {showQuickCheckExpl[qIdx] && (
+                              <div
+                                style={{
+                                  marginTop: '12px',
+                                  padding: '10px 14px',
+                                  borderRadius: '8px',
+                                  background: isCorrect ? '#ecfdf5' : '#fffbeb',
+                                  border: isCorrect ? '1px solid #a7f3d0' : '1px solid #fde68a',
+                                  fontSize: '12px',
+                                  color: '#334155',
+                                }}
+                              >
+                                <b>{isCorrect ? '✓ Correct!' : '✗ Not quite.'}</b> {qc.explanation}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
+
+                {/* Lesson Navigation Footer */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #e2e8f0', paddingTop: '20px', flexWrap: 'wrap', gap: '10px' }}>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => prevLecture && setSelectedLecture(prevLecture)}
+                    disabled={!prevLecture}
+                  >
+                    <ChevronLeft size={16} /> Previous Lesson
                   </button>
 
-                  <div className="player-nav-btns">
-                    <button
-                      className="secondary"
-                      onClick={() => prevLecture && setSelectedLecture(prevLecture)}
-                      disabled={!prevLecture}
-                      title="Previous lecture"
-                    >
-                      <ChevronLeft size={16} /> Prev
-                    </button>
-                    <button
-                      className="secondary"
-                      onClick={() => nextLecture && setSelectedLecture(nextLecture)}
-                      disabled={!nextLecture}
-                      title="Next lecture"
-                    >
-                      Next <ChevronRight size={16} />
-                    </button>
-                  </div>
+                  <button
+                    className={`btn ${isLectureCompleted ? 'btn-teal' : 'btn-primary'}`}
+                    onClick={handleToggleComplete}
+                    disabled={isUpdatingProgress}
+                  >
+                    {isLectureCompleted ? <Check size={16} /> : <Circle size={16} />}
+                    {isLectureCompleted ? 'Completed — Click to Reopen' : 'Mark Lesson Complete'}
+                  </button>
+
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => nextLecture && setSelectedLecture(nextLecture)}
+                    disabled={!nextLecture}
+                  >
+                    Next Lesson <ChevronRight size={16} />
+                  </button>
                 </div>
               </div>
             </div>
+          ) : (
+            <div className="panel" style={{ padding: '40px', textAlign: 'center' }}>
+              <PlayCircle size={44} color="#94a3b8" style={{ margin: '0 auto 12px' }} />
+              <h3>Select a lesson from the curriculum</h3>
+              <p style={{ color: '#64748b', fontSize: '13px' }}>
+                Choose any lesson from the sidebar to start streaming classes and reviewing material.
+              </p>
+            </div>
           )}
 
-          {/* Curriculum Panel */}
-          <div className="panel">
-            <div className="panel-head">
-              <h2>
-                <BookOpen size={18} /> Curriculum
+          {/* Curriculum Accordion Panel */}
+          <div className="panel" style={{ borderRadius: '16px', border: '1px solid #e2e8f0', background: '#ffffff', padding: '24px' }}>
+            <div className="panel-head" style={{ marginBottom: '16px' }}>
+              <h2 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>
+                <BookOpen size={18} /> Course Curriculum
               </h2>
-              <span>
+              <span style={{ fontSize: '12px', color: '#64748b' }}>
                 {course.modules?.length || 0} modules • {allLectures.length} lessons
               </span>
             </div>
 
-            {course.modules?.map((m) => (
-              <div key={m.id} className="module">
-                <b style={{ display: 'block', marginBottom: '8px' }}>{m.title}</b>
-                {m.lectures?.map((l) => {
-                  const isSelected = selectedLecture?.id === l.id;
-                  const isDone = completedLectures.includes(l.id);
-                  return (
+            {course.modules?.map((m, mIdx) => (
+              <div key={m.id} style={{ marginBottom: '18px', border: '1px solid #f1f5f9', borderRadius: '12px', padding: '14px', background: '#fafbfc' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                  <b style={{ fontSize: '14px', color: '#0f172a' }}>
+                    {m.title}
+                  </b>
+                  <span style={{ fontSize: '11px', color: '#64748b' }}>
+                    {m.lectures?.length || 0} lessons
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {m.lectures?.map((l) => {
+                    const isSelected = selectedLecture?.id === l.id && activeView === 'lesson';
+                    const isDone = completedLectures.has(l.id);
+
+                    return (
+                      <div
+                        key={l.id}
+                        className={`lecture ${isSelected ? 'active' : ''}`}
+                        onClick={() => {
+                          setSelectedLecture({
+                            ...l,
+                            moduleTitle: m.title,
+                          });
+                          setActiveView('lesson');
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          background: isSelected ? '#eff6ff' : '#ffffff',
+                          border: isSelected ? '1px solid #3b82f6' : '1px solid #e2e8f0',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        {isDone ? (
+                          <CheckCircle2 size={16} color="#16a34a" style={{ flexShrink: 0 }} />
+                        ) : (
+                          <Circle size={16} color="#94a3b8" style={{ flexShrink: 0 }} />
+                        )}
+                        <span style={{ flexGrow: 1, fontSize: '13px', fontWeight: isSelected ? 600 : 400, color: '#1e293b' }}>
+                          {l.title}
+                        </span>
+                        <small style={{ color: '#64748b', fontSize: '11px' }}>
+                          {Math.round((l.duration_seconds || 0) / 60)} min
+                        </small>
+                      </div>
+                    );
+                  })}
+
+                  {/* Quizzes attached to module */}
+                  {m.quizzes?.map((qz) => (
                     <div
-                      className={`lecture ${isSelected ? 'active' : ''}`}
-                      key={l.id}
-                      onClick={() =>
-                        setSelectedLecture({
-                          ...l,
-                          moduleTitle: m.title,
-                        })
-                      }
+                      key={qz.id}
+                      onClick={() => handleOpenQuiz(qz.id, qz.title)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        padding: '10px 12px',
+                        borderRadius: '8px',
+                        background: activeView === 'quiz' && activeQuizId === qz.id ? '#f0fdf4' : '#fffbeb',
+                        border: activeView === 'quiz' && activeQuizId === qz.id ? '1px solid #10b981' : '1px solid #fde68a',
+                        cursor: 'pointer',
+                        marginTop: '4px',
+                      }}
                     >
-                      {isDone ? (
-                        <CheckCircle2 size={17} className="lecture-icon-completed" />
-                      ) : (
-                        <Circle size={17} className="lecture-icon-pending" />
-                      )}
-                      <span>{l.title}</span>
-                      <small>{Math.round((l.duration_seconds || 0) / 60)} min</small>
+                      <Award size={16} color="#d97706" style={{ flexShrink: 0 }} />
+                      <span style={{ flexGrow: 1, fontSize: '13px', fontWeight: 600, color: '#92400e' }}>
+                        {qz.title}
+                      </span>
+                      <span style={{ fontSize: '11px', background: '#fef3c7', color: '#b45309', padding: '2px 6px', borderRadius: '4px' }}>
+                        Quiz ({qz.total_questions || 3} Qs)
+                      </span>
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
               </div>
             ))}
           </div>
         </div>
 
         {/* Right Column: AI Tutor Panel */}
-        <div className="panel tutor">
-          <div className="panel-head">
+        <div
+          className="panel tutor"
+          style={{
+            position: 'sticky',
+            top: '80px',
+            borderRadius: '16px',
+            border: '1px solid #e2e8f0',
+            background: '#ffffff',
+            display: 'flex',
+            flexDirection: 'column',
+            height: 'calc(100vh - 100px)',
+            maxHeight: '800px',
+            padding: 0,
+            overflow: 'hidden',
+          }}
+        >
+          {/* AI Header */}
+          <div
+            style={{
+              padding: '16px 20px',
+              borderBottom: '1px solid #e2e8f0',
+              background: '#091e42',
+              color: '#ffffff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}
+          >
             <div>
-              <span className="eyebrow">AI TUTOR</span>
-              <h2>
-                <Sparkles size={18} /> Ask about this course
-              </h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Sparkles size={16} color="#2dd4bf" />
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#2dd4bf', letterSpacing: '0.05em' }}>
+                  VERTEXLEARN AI
+                </span>
+              </div>
+              <h3 style={{ fontSize: '15px', fontWeight: 800, margin: '2px 0 0', color: '#ffffff' }}>
+                AI Learning Copilot
+              </h3>
             </div>
+
+            {/* Mode Selector */}
             <select
               value={mode}
               onChange={(e) => setMode(e.target.value)}
+              style={{
+                fontSize: '11px',
+                padding: '4px 8px',
+                borderRadius: '6px',
+                background: '#132e5d',
+                color: '#ffffff',
+                border: '1px solid rgba(255,255,255,0.2)',
+                fontWeight: 600,
+              }}
               aria-label="Tutor explanation mode"
             >
-              <option value="beginner">beginner</option>
-              <option value="intermediate">intermediate</option>
-              <option value="advanced">advanced</option>
+              <option value="beginner">Beginner</option>
+              <option value="intermediate">Intermediate</option>
+              <option value="advanced">Advanced</option>
             </select>
           </div>
 
+          {/* Quick Action Chips Bar */}
+          <div
+            style={{
+              display: 'flex',
+              gap: '6px',
+              padding: '10px 16px',
+              background: '#f8fafc',
+              borderBottom: '1px solid #e2e8f0',
+              overflowX: 'auto',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <button
+              type="button"
+              className="prompt-chip"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => handleQuickAction('explain')}
+              disabled={isAsking}
+            >
+              💡 Explain Simply
+            </button>
+            <button
+              type="button"
+              className="prompt-chip"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => handleQuickAction('example')}
+              disabled={isAsking}
+            >
+              💻 Example
+            </button>
+            <button
+              type="button"
+              className="prompt-chip"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => handleQuickAction('summarize')}
+              disabled={isAsking}
+            >
+              📝 Summarize
+            </button>
+            <button
+              type="button"
+              className="prompt-chip"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => handleQuickAction('quiz_me')}
+              disabled={isAsking}
+            >
+              🎯 Quiz Me
+            </button>
+            <button
+              type="button"
+              className="prompt-chip"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => handleQuickAction('interview')}
+              disabled={isAsking}
+            >
+              💼 Interview Q
+            </button>
+          </div>
+
           {/* Chat message stream */}
-          <div className="chat-box" ref={chatBoxRef}>
+          <div
+            className="chat-box"
+            ref={chatBoxRef}
+            style={{
+              flexGrow: 1,
+              overflowY: 'auto',
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+            }}
+          >
             {messages.length === 0 ? (
-              <div className="chat-empty">
-                <Sparkles size={32} color="#1758a7" />
-                <b>Course-grounded AI Tutor</b>
-                <span>
-                  Ask any question about this course. VertexLearn AI retrieves relevant course
-                  material and provides sourced explanations.
+              <div className="chat-empty" style={{ textAlign: 'center', padding: '32px 16px', color: '#64748b' }}>
+                <Sparkles size={36} color="#0d9488" style={{ margin: '0 auto 10px' }} />
+                <b style={{ display: 'block', fontSize: '14px', color: '#0f172a', marginBottom: '6px' }}>
+                  Grounded AI Tutor Ready
+                </b>
+                <span style={{ fontSize: '12px', lineHeight: 1.5, display: 'block', marginBottom: '16px' }}>
+                  Ask questions about this lecture or click a prompt below. VertexLearn AI searches course transcripts and notes to formulate sourced responses.
                 </span>
 
-                {/* Prompt suggestion chips */}
-                <div className="prompt-chips">
-                  {promptSuggestions.map((promptText, i) => (
-                    <button
-                      key={i}
-                      className="prompt-chip"
-                      onClick={() => ask(promptText)}
-                      disabled={isAsking}
-                    >
-                      {promptText}
-                    </button>
-                  ))}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <button
+                    className="prompt-chip"
+                    onClick={() => ask('What is REST API? Explain it simply.')}
+                    disabled={isAsking}
+                    style={{ textAlign: 'left', fontSize: '12px' }}
+                  >
+                    "What is REST API? Explain it simply."
+                  </button>
+                  <button
+                    className="prompt-chip"
+                    onClick={() => ask('What is the difference between GET and POST?')}
+                    disabled={isAsking}
+                    style={{ textAlign: 'left', fontSize: '12px' }}
+                  >
+                    "What is the difference between GET and POST?"
+                  </button>
+                  <button
+                    className="prompt-chip"
+                    onClick={() => ask('Give me an interview question on this topic.')}
+                    disabled={isAsking}
+                    style={{ textAlign: 'left', fontSize: '12px' }}
+                  >
+                    "Give me an interview question on this topic."
+                  </button>
                 </div>
               </div>
             ) : (
               <>
                 {messages.map((m) => (
                   <div key={m.id} className={m.role === 'user' ? 'user-msg' : 'ai-msg'}>
-                    <div>{m.text}</div>
+                    <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5, fontSize: '13px' }}>
+                      {m.text}
+                    </div>
 
-                    {/* Sources citations */}
+                    {/* Sourced citations */}
                     {m.sources && m.sources.length > 0 && (
-                      <div className="sources" style={{ marginTop: '8px' }}>
-                        <b>Sources:</b>
-                        {m.sources.map((s, idx) => {
-                          const matchedLecture = allLectures.find((l) => l.id === s.lecture_id);
-                          return (
-                            <span
-                              key={idx}
-                              className="source-tag"
-                              title={
-                                matchedLecture
-                                  ? `Jump to ${matchedLecture.title}`
-                                  : 'Referenced course material'
-                              }
-                              onClick={() => {
-                                if (matchedLecture) {
-                                  setSelectedLecture(matchedLecture);
-                                }
-                              }}
-                            >
-                              <BookOpen size={10} />
-                              {matchedLecture
-                                ? matchedLecture.title
-                                : `Lecture ${s.lecture_id.slice(0, 8)}…`}
-                            </span>
-                          );
-                        })}
+                      <div className="sources" style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+                        <b style={{ fontSize: '11px', color: '#64748b', display: 'block', marginBottom: '4px' }}>
+                          Verified Course Sources:
+                        </b>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                          {m.sources.map((s, idx) => {
+                            const matchedLecture = allLectures.find((l) => l.id === s.lecture_id);
+                            return (
+                              <span
+                                key={idx}
+                                className="source-tag"
+                                title="Click to jump to lecture"
+                                onClick={() => {
+                                  if (matchedLecture) {
+                                    setSelectedLecture(matchedLecture);
+                                    setActiveView('lesson');
+                                  }
+                                }}
+                                style={{ cursor: 'pointer', fontSize: '11px' }}
+                              >
+                                <BookOpen size={10} />
+                                {matchedLecture ? matchedLecture.title : `Lecture ${s.lecture_id.slice(0, 8)}`}
+                              </span>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
-                    <span className="chat-timestamp">{m.timestamp}</span>
+                    <span className="chat-timestamp" style={{ fontSize: '10px', marginTop: '4px', display: 'block', opacity: 0.7 }}>
+                      {m.timestamp}
+                    </span>
                   </div>
                 ))}
 
-                {/* Loading indicator */}
                 {isAsking && (
-                  <div className="chat-loading">
-                    <Loader2 size={16} />
-                    <span>VertexLearn AI is generating an answer…</span>
+                  <div className="chat-loading" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#0d9488' }}>
+                    <Loader2 size={16} className="chat-loading" />
+                    <span>VertexLearn AI is generating an answer...</span>
                   </div>
                 )}
               </>
             )}
           </div>
 
-          {/* Question input form */}
-          <div className="ask">
+          {/* Question Input Form */}
+          <div
+            className="ask"
+            style={{
+              padding: '12px 16px',
+              borderTop: '1px solid #e2e8f0',
+              background: '#f8fafc',
+              display: 'flex',
+              gap: '8px',
+            }}
+          >
             <input
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && ask()}
-              placeholder="e.g. Explain REST APIs and HTTP methods simply..."
+              placeholder="Ask AI Tutor a question..."
               disabled={isAsking}
+              style={{
+                flexGrow: 1,
+                padding: '10px 14px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                background: '#ffffff',
+              }}
             />
             <button
-              className="primary"
+              className="btn btn-primary"
               onClick={() => ask()}
               disabled={isAsking || !question.trim()}
               title="Send question"
+              style={{ padding: '10px 14px' }}
             >
               {isAsking ? <Loader2 size={16} className="chat-loading" /> : <Send size={16} />}
             </button>
