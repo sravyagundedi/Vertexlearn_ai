@@ -156,16 +156,27 @@ export default function CourseDetails() {
       setLectureSummary(res.data?.summary || '');
       setIsSummaryCached(!!res.data?.cached);
     } catch (err: any) {
-      setSummaryError('Failed to generate summary. Please try again.');
+      console.error('[AI Summary] Generation failed:', err.response?.status, err.response?.data || err.message);
+      const serverMessage = err.response?.data?.error?.message || err.response?.data?.detail;
+      const errorMsg =
+        serverMessage ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key (ANTHROPIC_API_KEY) to the environment configuration.'
+          : err.response?.status === 400
+          ? 'This lecture does not have transcript content available for summarization.'
+          : 'Failed to generate summary. Please try again.');
+      setSummaryError(errorMsg);
     } finally {
       setIsLoadingSummary(false);
     }
   };
 
   const [isGeneratingLectureQuiz, setIsGeneratingLectureQuiz] = useState<boolean>(false);
+  const [quizGenError, setQuizGenError] = useState<string | null>(null);
   const handleGenerateLectureQuiz = async () => {
     if (!selectedLecture?.id || isGeneratingLectureQuiz) return;
     setIsGeneratingLectureQuiz(true);
+    setQuizGenError(null);
     try {
       const res = await aiApi.generateQuiz({
         course_id: id,
@@ -177,8 +188,15 @@ export default function CourseDetails() {
       if (generatedQuizId) {
         handleOpenQuiz(generatedQuizId, generatedTitle);
       }
-    } catch (err) {
-      console.error('Failed to generate lecture quiz:', err);
+    } catch (err: any) {
+      console.error('[AI Quiz] Generation failed:', err.response?.status, err.response?.data || err.message);
+      const serverMessage = err.response?.data?.error?.message || err.response?.data?.detail;
+      const errorMsg =
+        serverMessage ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key (ANTHROPIC_API_KEY) to the environment configuration.'
+          : 'Failed to generate quiz. Please try again.');
+      setQuizGenError(errorMsg);
     } finally {
       setIsGeneratingLectureQuiz(false);
     }
@@ -380,13 +398,21 @@ export default function CourseDetails() {
       };
       setMessages((prev) => [...prev, aiMsg]);
     } catch (err: any) {
-      console.error('AI Tutor request failed', err);
+      console.error('[AI Tutor] Request failed:', err.response?.status, err.response?.data || err.message);
+      const serverMessage = err.response?.data?.error?.message || err.response?.data?.detail;
+      const errorMsg =
+        serverMessage ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+          : err.response?.status === 401
+          ? 'Please log in to chat with the AI Tutor.'
+          : 'AI Tutor is temporarily unavailable. Please verify your connection or try again in a moment.');
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          text: 'AI Tutor is temporarily unavailable. Please verify your connection or try again in a moment.',
+          text: errorMsg,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -679,6 +705,11 @@ export default function CourseDetails() {
                       {isGeneratingLectureQuiz ? 'Generating AI Quiz...' : 'Generate AI Quiz'}
                     </button>
                   </div>
+                  {quizGenError && (
+                    <div style={{ width: '100%', marginTop: '8px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fee2e2', borderRadius: '8px', color: '#dc2626', fontSize: '12px' }}>
+                      {quizGenError}
+                    </div>
+                  )}
                 </div>
               )}
 

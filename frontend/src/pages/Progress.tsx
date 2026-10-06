@@ -44,7 +44,7 @@ export default function Progress() {
   const totalLessons = stats?.total_lessons_available ?? enrollments.reduce((acc, curr) => acc + Number(curr.total_lectures || 0), 0);
   const avgQuizScore = stats?.avg_quiz_score ?? 0;
   const avgProgress = stats?.avg_progress ?? 0;
-  const streak = stats?.learning_streak_days ?? 1;
+  const streak = stats?.learning_streak_days ?? 0;
 
   const studyTimeMin = Math.round((stats?.study_time_seconds || mastery?.total_study_time_seconds || 0) / 60);
   const studyHours = (studyTimeMin / 60).toFixed(1);

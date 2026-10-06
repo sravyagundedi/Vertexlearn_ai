@@ -223,10 +223,16 @@ export default function Flashcards() {
       }
     } catch (err: any) {
       console.error('Failed to generate flashcards', err);
-      setStatusMessage('Unable to generate flashcards at this time.');
+      const errMsg =
+        err.response?.data?.error?.message ||
+        err.response?.data?.detail ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+          : 'Unable to generate flashcards at this time.');
+      setStatusMessage(errMsg);
     } finally {
       setGenerating(false);
-      setTimeout(() => setStatusMessage(null), 3000);
+      setTimeout(() => setStatusMessage(null), 6000);
     }
   };
 

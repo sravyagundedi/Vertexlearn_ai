@@ -140,13 +140,19 @@ export default function AiTutor() {
       };
       setMessages((prev) => [...prev, aiMsg]);
     } catch (err: any) {
-      setErrorMessage('AI Tutor is temporarily unavailable. Please try again.');
+      const errorMsg =
+        err.response?.data?.error?.message ||
+        err.response?.data?.detail ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+          : 'AI Tutor is temporarily unavailable. Please try again.');
+      setErrorMessage(errorMsg);
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          text: 'AI Tutor encountered a connection error. Please try asking again.',
+          text: errorMsg,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);

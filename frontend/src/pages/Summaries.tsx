@@ -83,7 +83,13 @@ export default function Summaries() {
       })
       .catch((err) => {
         console.error('Failed to load summary:', err);
-        setErrorMessage('Failed to load lesson summary. Click "Generate Summary" below.');
+        const errorMsg =
+          err.response?.data?.error?.message ||
+          err.response?.data?.detail ||
+          (err.response?.status === 503
+            ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+            : 'No summary currently available. Click "Generate Summary" below.');
+        setErrorMessage(errorMsg);
         setSummary('');
       })
       .finally(() => setLoadingSummary(false));
@@ -101,7 +107,13 @@ export default function Summaries() {
       setIsCached(!!res.data?.cached);
     } catch (err: any) {
       console.error('Generation error:', err);
-      setErrorMessage('Generating summary failed. Please try again.');
+      const errorMsg =
+        err.response?.data?.error?.message ||
+        err.response?.data?.detail ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+          : 'Generating summary failed. Please try again.');
+      setErrorMessage(errorMsg);
     } finally {
       setGenerating(false);
     }

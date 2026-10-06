@@ -52,6 +52,15 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+app.get('/api/v1/health', async (_req, res) => {
+  try {
+    await q('SELECT 1');
+    res.json({ status: 'ok', service: 'vertexlearn-core' });
+  } catch (err: any) {
+    res.status(503).json({ status: 'degraded', database: err.message });
+  }
+});
+
 // ============================================================================
 // AUTHENTICATION ROUTES
 // ============================================================================
@@ -442,41 +451,44 @@ async function handleLectureSummary(req: AuthRequest, res: any) {
       Array.isArray(lecture.key_concepts) && lecture.key_concepts.length > 0 ? `KEY CONCEPTS:\n${lecture.key_concepts.join(', ')}` : '',
     ].filter(Boolean).join('\n\n');
 
-    const promptText = `Lecture Title: ${lecture.title}\n\n${textPieces || lecture.title}`;
+    if (!textPieces) {
+      return res.status(400).json({
+        error: {
+          code: 'NO_TRANSCRIPT',
+          message: 'This lecture does not have transcript content available for summarization.',
+        },
+      });
+    }
+
+    const promptText = `Lecture Title: ${lecture.title}\n\n${textPieces}`;
 
     let summaryText = '';
     try {
       const aiRes = await aiProxy('/ai/summarize', { text: promptText });
-      summaryText = aiRes.data?.summary || '';
+      if (aiRes.status === 503 || (aiRes.data && aiRes.data.detail && aiRes.data.detail.includes('AI service is not configured'))) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
+      if (aiRes.status !== 200 || !aiRes.data?.summary) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
+      summaryText = aiRes.data.summary;
     } catch {
-      const keyConceptsList = (lecture.key_concepts && lecture.key_concepts.length > 0)
-        ? lecture.key_concepts.map((k: string) => `- **${k}**: Core foundational concept explained in this lecture.`).join('\n')
-        : '- **Architectural Boundaries**: Modular structure with strict separation of concerns.\n- **Production Best Practices**: Input validation, logging, and error handling.';
-
-      const snippet = lecture.transcript?.slice(0, 300) || lecture.notes?.slice(0, 300) || lecture.description || 'Core curriculum lecture.';
-
-      summaryText = `### 📌 Overview for **${lecture.title}**
-
-${snippet}
-
-### 💡 Key Concepts
-${keyConceptsList}
-
-### 🎯 Important Points
-1. Master foundational principles before progressing to advanced downstream topics.
-2. Adhere to production best practices regarding security, validation, and error boundaries.
-3. Test your retention with the lecture quick check and module quiz.
-
-### 📖 Key Definitions
-- **Idempotency**: An operation that can be applied multiple times without altering the result beyond the initial application.
-- **Statelessness**: The paradigm where each request contains all required execution and authentication context.
-
-### 📝 Exam & Revision Points
-- Understand the tradeoffs of core architectural decisions in this domain.
-- Review standard HTTP verbs, status codes, and error mitigation strategies.
-- Practice explaining the lifecycle flow from client request to data store resolution.
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+        },
+      });
     }
 
     // Save into database for fast retrieval next time
@@ -1284,20 +1296,6 @@ app.get('/api/v1/learning/profile', requireAuth, async (req: AuthRequest, res, n
       }
     });
 
-    // Default fallbacks if user hasn't attempted quizzes or flashcards yet
-    if (strengths.length === 0) {
-      if (enrollments.length > 0) {
-        strengths.push(`${enrollments[0].course_title} (Foundations)`);
-      } else {
-        strengths.push('Modern Full-Stack Architecture Principles');
-      }
-    }
-
-    if (weaknesses.length === 0) {
-      weaknesses.push('Relational Data Modeling & Multi-Table Query Optimization');
-      recommendedTopics.push('Review PostgreSQL Indexes, Foreign Keys & CTEs');
-    }
-
     // Assemble Recommended Lessons
     const recommendedLessons: any[] = nextLectures.map((nl: any) => ({
       course_id: nl.course_id,
@@ -1344,6 +1342,11 @@ app.get('/api/v1/learning/profile', requireAuth, async (req: AuthRequest, res, n
       )
     )[0]?.count || 0;
 
+    // If user has not attempted quizzes or flashcards yet, reflect only real enrolled course state
+    if (strengths.length === 0 && enrollments.length > 0 && completedLecturesCount > 0) {
+      strengths.push(`${enrollments[0].course_title} (In Progress)`);
+    }
+
     let difficultyLevel = 'Beginner';
     if (avgScore >= 80 && completedLecturesCount >= 5) {
       difficultyLevel = 'Advanced';
@@ -1374,7 +1377,7 @@ app.get('/api/v1/learning/profile', requireAuth, async (req: AuthRequest, res, n
       flashcards_reviewed_count: flashcardRows.length,
       flashcards_known_count: knownCards.length,
       flashcards_difficult_count: difficultCards.length,
-      learning_streak_days: streakRow?.current_streak || 1,
+      learning_streak_days: streakRow?.current_streak || 0,
       study_time_seconds: studyTimeRow?.total_seconds || 0,
     };
 
@@ -1722,136 +1725,7 @@ async function aiProxy(path: string, body: any) {
   }
 }
 
-// Fallback educational answers generated directly from PostgreSQL when AI service is unavailable
-async function localGroundedChatFallback(courseId: string, question: string, mode: string = 'intermediate') {
-  const qLower = question.toLowerCase();
-  const searchWord = question.split(' ').find(w => w.length > 3) || question.split(' ')[0] || '';
 
-  // Retrieve relevant lectures and notes from DB
-  const lectures = await q<any>(
-    `SELECT l.id, l.title, l.transcript, l.notes
-     FROM lectures l
-     JOIN modules m ON m.id = l.module_id
-     WHERE m.course_id = $1
-       AND (l.transcript ILIKE '%' || $2 || '%' OR l.notes ILIKE '%' || $2 || '%' OR l.title ILIKE '%' || $2 || '%')
-     LIMIT 3`,
-    [courseId, searchWord]
-  );
-
-  const fallbackLectures = lectures.length > 0 ? lectures : await q<any>(
-    `SELECT l.id, l.title, l.transcript, l.notes
-     FROM lectures l
-     JOIN modules m ON m.id = l.module_id
-     WHERE m.course_id = $1
-     LIMIT 2`,
-    [courseId]
-  );
-
-  if (fallbackLectures.length === 0) {
-    return {
-      reply: "I couldn't find enough information in this course material to answer that accurately.",
-      mode,
-      sources: [],
-    };
-  }
-
-  let answerText = '';
-
-  if (qLower.includes('rest') && (qLower.includes('api') || qLower.includes('what') || qLower.includes('explain'))) {
-    answerText = `### 🌐 What is a REST API?
-
-**REST (Representational State Transfer)** is an architectural standard used for web applications to communicate over HTTP.
-
-#### 💡 Simple Explanation:
-Think of a REST API like a customer and waiter in a restaurant. You (the client) make an order from the menu (HTTP endpoint), the waiter takes your order to the kitchen (server/database), and returns your food in a standard container (JSON response).
-
-#### 📌 Common HTTP Methods:
-- **\`GET\`**: Retrieve information (e.g. \`GET /api/v1/courses\`)
-- **\`POST\`**: Create new resources (e.g. \`POST /api/v1/courses\`)
-- **\`PUT\` / \`PATCH\`**: Update an existing resource
-- **\`DELETE\`**: Remove a resource
-
-#### 🎯 Key Characteristics:
-1. **Stateless**: Each request carries all authentication tokens and parameters required.
-2. **Resource-Oriented**: Endpoints are structured around resources (like \`/users\`, \`/lectures\`).
-3. **Structured Codes**: Returns standard HTTP status codes (\`200 OK\`, \`201 Created\`, \`404 Not Found\`).
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
-  } else if (qLower.includes('difference') && qLower.includes('get') && qLower.includes('post')) {
-    answerText = `### ⚖️ Difference Between GET and POST
-
-In HTTP architecture, **GET** and **POST** serve distinct purposes:
-
-| Aspect | GET | POST |
-| :--- | :--- | :--- |
-| **Primary Role** | Read / retrieve data | Create new resources or submit data |
-| **Payload / Body** | No request body | Carries payload (e.g. JSON) in request body |
-| **Idempotency** | **Idempotent** (safe to repeat multiple times) | **Non-Idempotent** (repeating may create duplicate records) |
-| **Caching** | Browser / CDN cacheable | Not cached by default |
-| **Parameters** | Appended to URL query string | Included securely in the HTTP request body |
-
-#### 💡 Practical VertexLearn Example:
-- \`GET /api/v1/courses\` fetches all courses without modifying the database.
-- \`POST /api/v1/courses/:id/enroll\` adds a new enrollment record for the learner.
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
-  } else if (qLower.includes('supervised') && qLower.includes('learning')) {
-    answerText = `### 🤖 Supervised Learning
-
-**Supervised Learning** is a branch of machine learning where algorithms are trained on labeled datasets.
-
-#### 💡 Core Mechanism:
-Each training sample consists of input features paired with a known ground-truth output. The model iteratively updates its internal parameters to minimize prediction loss.
-
-#### 📌 Primary Tasks:
-- **Classification**: Assigning inputs to categorical classes (e.g. spam detection, image labeling).
-- **Regression**: Predicting continuous numeric targets (e.g. price forecasting).
-
-#### ⚖️ Contrast with Unsupervised Learning:
-Unlike unsupervised learning which seeks unlabeled patterns and clusters, supervised learning depends on explicit target annotations.
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
-  } else if (qLower.includes('summar') || qLower.includes('key concept')) {
-    const lectureTitle = fallbackLectures[0]?.title || 'Course Material';
-    answerText = `### 📝 Lesson Summary: ${lectureTitle}
-
-Here is a summary of the core principles:
-1. **Core Focus**: Master the foundational concepts, data flows, and architectural boundaries.
-2. **Hands-On Application**: Write clean, modular code with thorough input validation and error handling.
-3. **Review**: Use the integrated module quizzes to test your understanding before advancing.
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
-  } else {
-    if (lectures.length === 0) {
-      return {
-        reply: "I couldn't find enough information in this course material to answer that accurately.",
-        mode,
-        sources: [],
-      };
-    }
-    const srcTitle = fallbackLectures[0]?.title || 'Course Content';
-    answerText = `### 🎓 VertexLearn AI Tutor (${mode} mode)
-
-Regarding your question: *"${question}"*
-
-Based on **${srcTitle}**:
-- This topic is a key building block in your curriculum.
-- In modern software engineering, adhering to standard practices ensures high maintainability and security.
-- Practice applying this concept in the interactive code examples and complete the quiz to test your mastery.
-
-> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`;
-  }
-
-  return {
-    reply: answerText,
-    mode,
-    sources: fallbackLectures.map((l: any) => ({
-      lecture_id: l.id,
-      chunk_id: null,
-      title: l.title,
-    })),
-  };
-}
 
 // GET AI chat history for the authenticated user and course
 app.get('/api/v1/ai/chat/history', requireAuth, async (req: AuthRequest, res) => {
@@ -1954,13 +1828,34 @@ app.post('/api/v1/ai/chat', requireAuth, async (req: AuthRequest, res) => {
       [sessionId, 'user', question]
     );
 
-    // 3. Query AI service or fallback
+    // 3. Query AI service
     let responseData: any;
     try {
       const x = await aiProxy('/ai/chat', req.body);
+      if (x.status === 503 || (x.data && x.data.detail && x.data.detail.includes('AI service is not configured'))) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
+      if (x.status !== 200 || !x.data) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
       responseData = x.data;
     } catch {
-      responseData = await localGroundedChatFallback(course_id, question, mode);
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+        },
+      });
     }
 
     // 4. Enrich sources with lecture titles if needed
@@ -2069,73 +1964,38 @@ app.post('/api/v1/ai/generate-quiz', requireAuth, async (req: AuthRequest, res) 
       contextTitle = 'Full Stack Development';
     }
 
-    // 3. Request generation from AI service or fallback
+    // 3. Request generation from AI service
     let parsedQuestions: any[] = [];
     try {
       const aiRes = await aiProxy('/ai/generate-quiz', {
         text: contextText,
         number_of_questions: Number(number_of_questions) || 5,
       });
+      if (aiRes.status === 503 || (aiRes.data && aiRes.data.detail && aiRes.data.detail.includes('AI service is not configured'))) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
       if (Array.isArray(aiRes.data?.questions) && aiRes.data.questions.length > 0) {
         parsedQuestions = aiRes.data.questions;
+      } else {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
       }
     } catch {
-      // Graceful local fallback questions
-    }
-
-    if (!parsedQuestions || parsedQuestions.length === 0) {
-      parsedQuestions = [
-        {
-          question_text: `Which architectural principle is foundational in ${contextTitle}?`,
-          options: [
-            { option_text: 'Stateless communication and predictable resource representations', is_correct: true },
-            { option_text: 'Storing all user sessions permanently in RAM without database backups', is_correct: false },
-            { option_text: 'Writing single-file monolithic scripts without modules', is_correct: false },
-            { option_text: 'Ignoring HTTP status codes in client responses', is_correct: false },
-          ],
-          explanation: 'Statelessness and modular separation ensure high scalability, reliability, and security.',
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
         },
-        {
-          question_text: 'What HTTP method should be used when updating an existing resource with partial modifications?',
-          options: [
-            { option_text: 'GET', is_correct: false },
-            { option_text: 'PATCH', is_correct: true },
-            { option_text: 'DELETE', is_correct: false },
-            { option_text: 'HEAD', is_correct: false },
-          ],
-          explanation: 'PATCH is specifically defined by RFC 5789 for applying partial modifications to a resource.',
-        },
-        {
-          question_text: 'What does an HTTP 401 Unauthorized status code indicate to the client?',
-          options: [
-            { option_text: 'The server encountered an unexpected internal crash', is_correct: false },
-            { option_text: 'The request lacks valid authentication credentials for the target resource', is_correct: true },
-            { option_text: 'The requested resource was permanently moved to a new URL', is_correct: false },
-            { option_text: 'The client sent an empty payload', is_correct: false },
-          ],
-          explanation: '401 indicates that authentication is required and has either failed or has not yet been provided.',
-        },
-        {
-          question_text: 'Why is input validation critical at API boundaries?',
-          options: [
-            { option_text: 'It prevents SQL injection, data corruption, and malformed request states', is_correct: true },
-            { option_text: 'It converts the backend into a mobile application', is_correct: false },
-            { option_text: 'It speeds up client CSS rendering', is_correct: false },
-            { option_text: 'It disables cross-origin resource sharing (CORS)', is_correct: false },
-          ],
-          explanation: 'Validating and sanitizing inputs at controller boundaries protects data integrity and stops injection vulnerabilities.',
-        },
-        {
-          question_text: 'In database systems, what property does "Idempotency" refer to?',
-          options: [
-            { option_text: 'An operation can be repeated multiple times without changing the result beyond the initial application', is_correct: true },
-            { option_text: 'The database encrypts all passwords automatically', is_correct: false },
-            { option_text: 'Queries always execute in parallel across multiple CPU cores', is_correct: false },
-            { option_text: 'The database server runs without a file system', is_correct: false },
-          ],
-          explanation: 'Idempotent operations produce the exact same server state whether executed once or ten times.',
-        },
-      ];
+      });
     }
 
     // Limit to requested number of questions
@@ -2208,17 +2068,31 @@ app.post('/api/v1/ai/generate-quiz', requireAuth, async (req: AuthRequest, res) 
 
 app.post('/api/v1/ai/summarize', requireAuth, async (req, res) => {
   try {
-    try {
-      const x = await aiProxy('/ai/summarize', req.body);
-      return res.status(x.status).json(x.data);
-    } catch {
-      const text = req.body?.text || 'Course Material';
-      return res.json({
-        summary: `### 📌 Overview\n\n${text.slice(0, 300)}...\n\n### 💡 Key Concepts\n- **Architectural Foundations**: High cohesion, loose coupling, and clear boundaries.\n- **Production Best Practices**: Input validation and defensive programming.\n\n### 🎯 Important Points\n1. Follow standard architectural guidelines for maintainability.\n2. Ensure proper error handling and logging.\n3. Validate comprehension through module quizzes.\n\n### 📖 Key Definitions\n- **Idempotency**: An operation producing identical results upon repeated execution.\n- **Statelessness**: Every request contains all context needed for execution.\n\n### 📝 Exam & Revision Points\n- Review core component lifecycles and HTTP status codes.\n- Understand performance tradeoffs and error recovery mechanisms.\n\n> *[Notice: Running in Development AI Mode — Grounded in Course Content]*`,
+    const x = await aiProxy('/ai/summarize', req.body);
+    if (x.status === 503 || (x.data && x.data.detail && x.data.detail.includes('AI service is not configured'))) {
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+        },
       });
     }
+    if (x.status !== 200 || !x.data?.summary) {
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+        },
+      });
+    }
+    return res.status(x.status).json(x.data);
   } catch (e: any) {
-    res.status(500).json({ error: { code: 'AI_ERROR', message: 'Summarization unavailable' } });
+    res.status(503).json({
+      error: {
+        code: 'AI_NOT_CONFIGURED',
+        message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+      },
+    });
   }
 });
 
@@ -2420,40 +2294,31 @@ app.post('/api/v1/ai/generate-flashcards', requireAuth, async (req: AuthRequest,
         text: contextText,
         count: Number(count) || 8,
       });
+      if (aiRes.status === 503 || (aiRes.data && aiRes.data.detail && aiRes.data.detail.includes('AI service is not configured'))) {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
+      }
       if (Array.isArray(aiRes.data?.flashcards) && aiRes.data.flashcards.length > 0) {
         generatedCards = aiRes.data.flashcards;
+      } else {
+        return res.status(503).json({
+          error: {
+            code: 'AI_NOT_CONFIGURED',
+            message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
+          },
+        });
       }
-    } catch (err: any) {
-      console.warn('[AI Flashcards] Using local fallback generator:', err.message);
-    }
-
-    if (generatedCards.length === 0) {
-      generatedCards = [
-        {
-          question: `What is the core objective of ${contextTitle}?`,
-          answer: `To build robust, reliable, and maintainable software systems adhering to clean architectural boundaries.`,
+    } catch {
+      return res.status(503).json({
+        error: {
+          code: 'AI_NOT_CONFIGURED',
+          message: 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
         },
-        {
-          question: 'What is Idempotency in HTTP API design?',
-          answer: 'An operation is idempotent if executing it multiple times has the exact same effect on server state as executing it once (e.g. GET, PUT, DELETE).',
-        },
-        {
-          question: 'What is the primary difference between PUT and PATCH?',
-          answer: 'PUT replaces an entire existing resource, while PATCH applies partial updates modifying only specific fields.',
-        },
-        {
-          question: 'What does HTTP status code 401 Unauthorized signify?',
-          answer: 'The request lacks valid authentication credentials (e.g. missing or expired JWT) required to access the target resource.',
-        },
-        {
-          question: 'Why is strict schema validation essential at API boundaries?',
-          answer: 'It guarantees that incoming payloads conform to required data types and rules, mitigating security vulnerabilities such as SQL injection.',
-        },
-        {
-          question: 'What is Supervised Learning in Machine Learning?',
-          answer: 'A machine learning approach where algorithms learn mappings from input features to labeled ground-truth targets.',
-        },
-      ];
+      });
     }
 
     const targetLimit = Math.min(Math.max(Number(count) || 8, 2), 12);

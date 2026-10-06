@@ -57,7 +57,7 @@ export default function Dashboard() {
   );
   const lessonsCompleted = progressStats?.lessons_completed ?? 0;
   const avgQuizScore = progressStats?.avg_quiz_score ?? 0;
-  const streakDays = progressStats?.learning_streak_days ?? 7;
+  const streakDays = progressStats?.learning_streak_days ?? 0;
   const completedCourses = progressStats?.courses_completed ?? (
     enrollments.filter((e) => Number(e.progress_percent || 0) >= 100).length
   );

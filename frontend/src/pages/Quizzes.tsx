@@ -123,7 +123,13 @@ export default function Quizzes() {
       }
     } catch (err: any) {
       console.error('Quiz generation failed:', err);
-      setGenerateError('Failed to generate quiz. Please try again.');
+      const errMsg =
+        err.response?.data?.error?.message ||
+        err.response?.data?.detail ||
+        (err.response?.status === 503
+          ? 'AI service is not configured. Add the required AI provider API key to the environment configuration.'
+          : 'Failed to generate quiz. Please try again.');
+      setGenerateError(errMsg);
     } finally {
       setIsGenerating(false);
     }

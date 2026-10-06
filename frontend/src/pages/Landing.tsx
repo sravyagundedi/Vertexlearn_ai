@@ -32,40 +32,9 @@ export default function Landing() {
       .then((res) => {
         setCourses(res.data?.slice(0, 3) || []);
       })
-      .catch(() => {
-        // Fallback demo courses if API fails or backend is initializing
-        setCourses([
-          {
-            id: 'c1',
-            title: 'Full Stack Web Development with React & Node',
-            description: 'Master modern frontend development, RESTful APIs, PostgreSQL and containerized deployments.',
-            category: 'Development',
-            difficulty: 'intermediate',
-            instructor: 'Demo Instructor',
-            rating: '4.9',
-            modules: [1, 2, 3],
-          },
-          {
-            id: 'c2',
-            title: 'Applied AI & RAG Pipeline Engineering',
-            description: 'Build enterprise-grade Retrieval Augmented Generation systems using vector databases and LLMs.',
-            category: 'Artificial Intelligence',
-            difficulty: 'advanced',
-            instructor: 'AI Research Lead',
-            rating: '4.8',
-            modules: [1, 2, 3, 4],
-          },
-          {
-            id: 'c3',
-            title: 'Cloud Architecture & DevOps Foundations',
-            description: 'Learn modern Docker, Kubernetes, CI/CD pipelines and scalable microservices architectures.',
-            category: 'Cloud & DevOps',
-            difficulty: 'beginner',
-            instructor: 'DevOps Architect',
-            rating: '4.7',
-            modules: [1, 2],
-          },
-        ]);
+      .catch((err) => {
+        console.error('Failed to load courses on landing page', err);
+        setCourses([]);
       })
       .finally(() => setLoading(false));
   }, []);
