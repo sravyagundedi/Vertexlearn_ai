@@ -15,7 +15,8 @@ export interface User {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (credentials: any) => Promise<void>;
+  login: (credentials: any) => Promise<any>;
+  verifyOtp: (data: { email: string; otp: string; temp_token?: string }) => Promise<any>;
   register: (data: any) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
@@ -49,12 +50,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (credentials: any) => {
     const res = await auth.login(credentials);
+    return res.data;
+  };
+
+  const verifyOtp = async (data: { email: string; otp: string; temp_token?: string }) => {
+    const res = await auth.verifyOtp(data);
     const { access_token, refresh_token, user: userData } = res.data;
     localStorage.setItem('vertexlearn_token', access_token);
     if (refresh_token) {
       localStorage.setItem('vertexlearn_refresh_token', refresh_token);
     }
     setUser(userData);
+    return res.data;
   };
 
   const register = async (data: any) => {
@@ -74,7 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, verifyOtp, register, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

@@ -1,8 +1,22 @@
 import bcrypt from 'bcryptjs';
 import { q, pool } from './pool.js';
 
+async function waitForDb(maxRetries = 20, delayMs = 1500) {
+  for (let i = 1; i <= maxRetries; i++) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (err: any) {
+      console.log(`Waiting for database (attempt ${i}/${maxRetries}): ${err.message}`);
+      if (i === maxRetries) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function seed() {
   console.log('--- Starting VertexLearn AI Seed Data Population ---');
+  await waitForDb();
 
   const passwordHash = await bcrypt.hash('Password123!', 12);
 
@@ -558,19 +572,12 @@ async function seed() {
       const moduleRes = await q<any>(
         `INSERT INTO modules (course_id, title, order_index)
          VALUES ($1, $2, $3)
-         ON CONFLICT DO NOTHING
+         ON CONFLICT (course_id, title) DO UPDATE SET order_index = EXCLUDED.order_index
          RETURNING id`,
         [courseId, mData.title, mData.order]
       );
 
-      let moduleId = moduleRes[0]?.id;
-      if (!moduleId) {
-        const found = await q<any>(
-          'SELECT id FROM modules WHERE course_id = $1 AND title = $2',
-          [courseId, mData.title]
-        );
-        moduleId = found[0]?.id;
-      }
+      const moduleId = moduleRes[0]?.id;
 
       // Lectures
       for (let lIdx = 0; lIdx < mData.lectures.length; lIdx++) {
@@ -581,7 +588,11 @@ async function seed() {
              description, learning_objectives, notes, key_concepts, quick_check
            )
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-           ON CONFLICT DO NOTHING
+           ON CONFLICT (module_id, title) DO UPDATE
+           SET video_url = EXCLUDED.video_url, transcript = EXCLUDED.transcript,
+               duration_seconds = EXCLUDED.duration_seconds, order_index = EXCLUDED.order_index,
+               description = EXCLUDED.description, learning_objectives = EXCLUDED.learning_objectives,
+               notes = EXCLUDED.notes, key_concepts = EXCLUDED.key_concepts, quick_check = EXCLUDED.quick_check
            RETURNING id`,
           [
             moduleId,
@@ -755,6 +766,153 @@ async function seed() {
      ON CONFLICT (user_id) DO UPDATE SET current_streak = 7, last_active_date = CURRENT_DATE`,
     [studentId]
   );
+
+  // 6. Curated Distinct Flashcards Across All Courses
+  await q('DELETE FROM user_flashcard_reviews');
+  await q('DELETE FROM flashcards');
+
+  const allCourses = await q<any>('SELECT id, title FROM courses');
+  for (const c of allCourses) {
+    const cLectures = await q<any>(
+      `SELECT l.id, l.title, l.module_id FROM lectures l
+       JOIN modules m ON m.id = l.module_id
+       WHERE m.course_id = $1 ORDER BY l.order_index ASC`,
+      [c.id]
+    );
+    const firstLectureId = cLectures[0]?.id || null;
+    const firstModuleId = cLectures[0]?.module_id || null;
+
+    let deck: Array<{ question: string; answer: string }> = [];
+
+    if (c.title.includes('Full Stack')) {
+      deck = [
+        {
+          question: 'What is the primary difference between HTTP GET and POST requests?',
+          answer: 'GET retrieves data without modifying server state, is idempotent, can be cached, and passes parameters in the query string. POST submits payload data to create or process resources, is not idempotent, and sends data in the request body.'
+        },
+        {
+          question: 'What is the Critical Rendering Path in browser performance?',
+          answer: 'The sequence of steps browsers perform to convert HTML, CSS, and JavaScript into pixels on screen: parsing DOM, computing CSSOM, constructing the Render Tree, calculating Layout (Reflow), and Painting.'
+        },
+        {
+          question: 'What is the purpose of Semantic HTML5 elements?',
+          answer: 'Semantic tags (like <article>, <nav>, <main>, <header>) convey structural meaning to browsers, search engines, and assistive screen readers, improving SEO and accessibility.'
+        },
+        {
+          question: 'What is the difference between CSS Flexbox and CSS Grid?',
+          answer: 'Flexbox is designed for 1-dimensional layouts along a single axis (either row OR column), ideal for navbars and card lists. CSS Grid is designed for 2-dimensional layouts (rows AND columns simultaneously), ideal for full-page dashboards and responsive grids.'
+        },
+        {
+          question: 'How does DNS Resolution work when opening a website?',
+          answer: 'The browser requests the domain IP from the local resolver, which queries the root DNS server, TLD nameserver, and authoritative nameserver to resolve human-readable domains into machine IP addresses.'
+        },
+        {
+          question: 'What is the role of the TCP 3-Way Handshake in HTTP connections?',
+          answer: 'TCP establishes reliable communication using SYN, SYN-ACK, and ACK packets to synchronize sequence numbers and verify connectivity before application data is exchanged.'
+        }
+      ];
+    } else if (c.title.includes('Machine Learning')) {
+      deck = [
+        {
+          question: 'What is Retrieval-Augmented Generation (RAG)?',
+          answer: 'RAG is an AI architecture that enhances Large Language Models by retrieving authoritative external documents from a vector database using semantic similarity, injecting the retrieved segments directly into the LLM context prompt.'
+        },
+        {
+          question: 'What is Cosine Similarity and how is it calculated in vector space?',
+          answer: 'Cosine similarity measures the cosine of the angle between two multi-dimensional embedding vectors, calculating semantic closeness independent of vector magnitude. Values closer to 1 indicate higher semantic relevance.'
+        },
+        {
+          question: 'What is the purpose of Chunk Overlap in text ingestion pipelines?',
+          answer: 'Chunk overlap preserves contextual continuity between neighboring document chunks by sharing ~50-100 tokens across boundaries, ensuring sentences split across chunks don\'t lose critical context.'
+        },
+        {
+          question: 'How does pgvector integrate vector search into PostgreSQL?',
+          answer: 'pgvector provides a specialized vector data type and distance operators (<=> for cosine distance, <-> for Euclidean distance) allowing similarity queries to run alongside relational SQL filters.'
+        },
+        {
+          question: 'What causes LLM Hallucinations and how does RAG mitigate them?',
+          answer: 'Hallucinations occur when LLMs generate plausibly sounding but false information due to knowledge cutoffs or statistical probability. RAG grounds completions in retrieved factual context with mandatory citations.'
+        },
+        {
+          question: 'What is the trade-off between Dense and Sparse Vector Retrieval?',
+          answer: 'Dense vectors (embeddings) capture deep semantic and conceptual meaning across synonyms, while sparse vectors (BM25) excel at exact keyword and token matching. Hybrid search combines both for optimal precision.'
+        }
+      ];
+    } else if (c.title.includes('React')) {
+      deck = [
+        {
+          question: 'What is Unidirectional Data Flow in React 19?',
+          answer: 'A core architectural pattern where state flows downward through components via props, while user interactions and events flow upward via callbacks, guaranteeing predictable single-source-of-truth rendering.'
+        },
+        {
+          question: 'What is the purpose of React Custom Hooks?',
+          answer: 'Custom hooks are JavaScript functions prefixed with "use" that encapsulate reusable stateful logic and side effects, allowing multiple components to share complex behaviors without duplicating code.'
+        },
+        {
+          question: 'What is the difference between useMemo and useCallback?',
+          answer: 'useMemo caches the calculated result of an expensive function, while useCallback caches the function definition itself between renders to avoid unnecessary re-renders of memoized child components.'
+        },
+        {
+          question: 'Why should state updates be immutable in React?',
+          answer: 'React uses reference comparison (Object.is) to detect state changes. Mutating objects directly skips re-renders and breaks component synchronization and time-travel debugging.'
+        },
+        {
+          question: 'What is the difference between controlled and uncontrolled form inputs?',
+          answer: 'Controlled inputs have their value bound to and driven by React state with an onChange handler; uncontrolled inputs store their own state in the DOM and are accessed using a ref.'
+        },
+        {
+          question: 'How does React 19 handle Actions and optimistic UI updates?',
+          answer: 'React 19 introduces the useActionState and useOptimistic hooks to manage async form transitions and preview state changes instantly before server confirmation.'
+        }
+      ];
+    } else if (c.title.includes('Database') || c.title.includes('SQL')) {
+      deck = [
+        {
+          question: 'What is Database Normalization and why is it important?',
+          answer: 'Normalization is the process of structuring relational tables across normal forms (1NF, 2NF, 3NF) to minimize data redundancy, avoid update anomalies, and enforce relational integrity.'
+        },
+        {
+          question: 'What are the ACID properties in database transactions?',
+          answer: 'ACID guarantees transactional reliability: Atomicity (all-or-nothing execution), Consistency (maintains schema constraints), Isolation (concurrent transactions don\'t interfere), and Durability (committed data survives system crashes).'
+        },
+        {
+          question: 'What is the difference between an INNER JOIN and a LEFT JOIN?',
+          answer: 'An INNER JOIN returns only rows that have matching values in both tables. A LEFT JOIN returns all rows from the left table, alongside matching rows from the right table (or NULLs if no match exists).'
+        },
+        {
+          question: 'How does a B-Tree Index improve query performance?',
+          answer: 'A B-Tree index maintains a self-balancing sorted tree structure that enables logarithmic time complexity (O(log N)) search, range scans, and ordering instead of full table scans.'
+        }
+      ];
+    } else {
+      deck = [
+        {
+          question: 'What is a Python Generator and why use yield?',
+          answer: 'A generator is an iterator function that produces values on-the-fly using yield instead of storing the entire sequence in memory, enabling memory-efficient processing of massive streams.'
+        },
+        {
+          question: 'What is the Global Interpreter Lock (GIL) in CPython?',
+          answer: 'The GIL is a mutex that prevents multiple native threads from executing Python bytecodes simultaneously in CPython, protecting memory management at the expense of true multi-core CPU parallelism.'
+        },
+        {
+          question: 'What is the difference between == and is in Python?',
+          answer: '== evaluates value equality (checks whether two objects hold equivalent contents), while is evaluates identity equality (checks whether two variables reference the exact same memory address).'
+        },
+        {
+          question: 'What are Python Decorators and how do they work?',
+          answer: 'Decorators are higher-order functions that take a function as an argument, wrap additional behavior around it (such as logging, timing, or authentication), and return the modified function.'
+        }
+      ];
+    }
+
+    for (const item of deck) {
+      await q(
+        `INSERT INTO flashcards (course_id, module_id, lecture_id, question, answer)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [c.id, firstModuleId, firstLectureId, item.question, item.answer]
+      );
+    }
+  }
 
   console.log('--- VertexLearn AI Database Seeding Finished Successfully! ---');
   await pool.end();

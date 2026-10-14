@@ -83,7 +83,7 @@ async function runTests() {
 
   const authHeaders = { Authorization: `Bearer ${token}` };
 
-  // Login with credentials
+  // Login with credentials (challenges for 2FA verification)
   const loginRes = await request('/auth/login', {
     method: 'POST',
     body: {
@@ -92,7 +92,24 @@ async function runTests() {
     },
   });
   assert(loginRes.status === 200, 'Student login succeeds with 200 OK');
-  assert(!!loginRes.data?.access_token, 'Valid JWT access token returned on login');
+  assert(loginRes.data?.otp_required === true, 'Two-Factor OTP challenge required');
+
+  // Retrieve out-of-band dispatched OTP from dev mailbox
+  const mailRes = await request(`/auth/dev-mailbox?email=${testEmail}`);
+  const dispatchedOtp = mailRes.data?.messages?.[0]?.code;
+  assert(!!dispatchedOtp, 'Verification code dispatched out-of-band via mail transport');
+
+  // Verify OTP to complete 2FA authentication
+  const verifyRes = await request('/auth/verify-otp', {
+    method: 'POST',
+    body: {
+      email: testEmail,
+      otp: dispatchedOtp,
+      temp_token: loginRes.data?.temp_token,
+    },
+  });
+  assert(verifyRes.status === 200, '2FA OTP verification succeeds with 200 OK');
+  assert(!!verifyRes.data?.access_token, 'Valid JWT access token issued upon 2FA verification');
 
   // 3. Course Catalog from PostgreSQL
   console.log('\n--- TEST 3: Course Catalog from PostgreSQL ---');
@@ -222,10 +239,10 @@ async function runTests() {
   assert(!hasFakeStrength, 'Mastery profile contains NO fake hardcoded strength strings');
   assert(!hasFakeWeakness, 'Mastery profile contains NO fake hardcoded weakness strings');
 
-  // 10. AI Service Configuration Verification (Zero Mock AI)
-  console.log('\n--- TEST 10: Strict AI Configuration Handling (Zero Mock AI) ---');
+  // 10. Realtime Educational LLM Engine Verification
+  console.log('\n--- TEST 10: Realtime Educational LLM Engine Verification ---');
 
-  // Test A: Relevant question when AI key unconfigured -> Returns 503
+  // Test A: Relevant question -> Realtime LLM Answer
   const chatRes = await request('/ai/chat', {
     method: 'POST',
     headers: authHeaders,
@@ -236,31 +253,31 @@ async function runTests() {
     },
   });
   console.log(`  -> AI Chat Relevant Query Status: ${chatRes.status}`);
-  assert(chatRes.status === 503, 'AI Chat returns HTTP 503 when AI provider key is unconfigured');
+  assert(chatRes.status === 200, 'AI Chat returns HTTP 200 with real LLM answer');
   assert(
-    chatRes.data?.error?.message === 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
-    'AI Chat returns exact required configuration error message'
+    typeof chatRes.data?.reply === 'string' && chatRes.data.reply.length > 50,
+    'AI Chat returns detailed, structured explanation'
   );
   assert(!JSON.stringify(chatRes.data).includes('Running in Development AI Mode'), 'AI Chat contains NO "Running in Development AI Mode" notice');
 
-  // Test B: Insufficient context question -> RAG returns clear notification
+  // Test B: Cross-Topic question -> Realtime LLM Architectural Answer
   const offTopicRes = await request('/ai/chat', {
     method: 'POST',
     headers: authHeaders,
     body: {
       course_id: sampleCourse.id,
-      question: 'How do I cultivate Japanese bonsai trees?',
+      question: 'What is the difference between GET and POST?',
       mode: 'intermediate',
     },
   });
-  console.log(`  -> AI Chat Off-Topic Query Status: ${offTopicRes.status}`);
-  assert(offTopicRes.status === 200, 'AI Chat off-topic query processed');
+  console.log(`  -> AI Chat Cross-Topic Query Status: ${offTopicRes.status}`);
+  assert(offTopicRes.status === 200, 'AI Chat cross-topic query processed with 200 OK');
   assert(
-    offTopicRes.data?.reply === "I couldn't find enough information in this course material to answer that accurately.",
-    'RAG returns clear notification when course context is insufficient'
+    offTopicRes.data?.reply.includes('GET') && offTopicRes.data?.reply.includes('POST'),
+    'AI Chat answers GET vs POST with real architectural comparison'
   );
 
-  // Test C: AI Generate Quiz when unconfigured
+  // Test C: AI Generate Quiz
   const quizGenRes = await request('/ai/generate-quiz', {
     method: 'POST',
     headers: authHeaders,
@@ -270,13 +287,13 @@ async function runTests() {
     },
   });
   console.log(`  -> AI Generate Quiz Response Status: ${quizGenRes.status}`);
-  assert(quizGenRes.status === 503, 'AI Generate Quiz returns HTTP 503 when unconfigured');
+  assert(quizGenRes.status === 201, 'AI Generate Quiz returns HTTP 201 Created');
   assert(
-    quizGenRes.data?.error?.message === 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
-    'AI Generate Quiz returns exact required configuration error message'
+    Array.isArray(quizGenRes.data?.questions) && quizGenRes.data.questions.length > 0,
+    'AI Generate Quiz returns structured multiple choice questions'
   );
 
-  // Test D: AI Generate Flashcards when unconfigured
+  // Test D: AI Generate Flashcards
   const flashcardGenRes = await request('/ai/generate-flashcards', {
     method: 'POST',
     headers: authHeaders,
@@ -286,23 +303,22 @@ async function runTests() {
     },
   });
   console.log(`  -> AI Generate Flashcards Response Status: ${flashcardGenRes.status}`);
-  assert(flashcardGenRes.status === 503, 'AI Generate Flashcards returns HTTP 503 when unconfigured');
+  assert(flashcardGenRes.status === 201, 'AI Generate Flashcards returns HTTP 201 Created');
   assert(
-    flashcardGenRes.data?.error?.message === 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
-    'AI Generate Flashcards returns exact required configuration error message'
+    Array.isArray(flashcardGenRes.data?.cards) && flashcardGenRes.data.cards.length > 0,
+    'AI Generate Flashcards returns valid flashcards array'
   );
 
-  // Test E: AI Summarize when unconfigured
-  const summarizeRes = await request('/ai/summarize', {
-    method: 'POST',
+  // Test E: AI Summarize
+  const summarizeRes = await request(`/lectures/${firstLecture.id}/summary?regenerate=true`, {
+    method: 'GET',
     headers: authHeaders,
-    body: { text: 'Testing lecture transcript summarization.' },
   });
   console.log(`  -> AI Summarize Response Status: ${summarizeRes.status}`);
-  assert(summarizeRes.status === 503, 'AI Summarize returns HTTP 503 when unconfigured');
+  assert(summarizeRes.status === 200, 'AI Summarize returns HTTP 200 OK');
   assert(
-    summarizeRes.data?.error?.message === 'AI service is not configured. Add the required AI provider API key to the environment configuration.',
-    'AI Summarize returns exact required configuration error message'
+    typeof summarizeRes.data?.summary === 'string' && summarizeRes.data.summary.includes('### 📌 Overview'),
+    'AI Summarize returns structured markdown summary with Overview'
   );
 
   console.log('\n===============================================================');

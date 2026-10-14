@@ -26,40 +26,68 @@ def is_context_relevant(question: str, chunks: list[dict]) -> bool:
     if not keywords:
         return True
     corpus = ' '.join(
-        (c.get('chunk_text', '') + ' ' + (c.get('lecture_title') or '')).lower()
+        (c.get('chunk_text', '') + ' ' + (c.get('lecture_title') or '') + ' ' + (c.get('course_title') or '')).lower()
         for c in chunks
     )
     return any(kw in corpus for kw in keywords)
 
 @router.post('/chat')
 def chat(b: ChatBody):
+    # 1. Check current course material
     chunks = retrieve(b.course_id, b.question, 4)
-    if not chunks or not is_context_relevant(b.question, chunks):
-        return {
-            'reply': "I couldn't find enough information in this course material to answer that accurately.",
-            'mode': b.mode,
-            'sources': []
-        }
+    relevant = is_context_relevant(b.question, chunks)
+    cross_course = False
 
-    context = '\n\n'.join(
-        f"[Source {i+1}: {x.get('lecture_title', 'Lecture')}] {x['chunk_text']}"
-        for i, x in enumerate(chunks)
-    )
+    # 2. If current course lacks matching context, search entire curriculum
+    if not relevant or not chunks:
+        global_chunks = retrieve(None, b.question, 4)
+        if global_chunks and is_context_relevant(b.question, global_chunks):
+            chunks = global_chunks
+            relevant = True
+            cross_course = True
+
+    context_segments = []
+    if relevant and chunks:
+        context_segments = [
+            f"[Source {i+1}: {x.get('lecture_title', 'Lesson')} ({x.get('course_title', 'Course')})]\n{x['chunk_text']}"
+            for i, x in enumerate(chunks)
+        ]
+
+    context_str = "\n\n".join(context_segments) if context_segments else "General Computer Science / Software Engineering Query."
+
     system = (
-        f'You are VertexLearn AI Tutor. Answer only from the supplied course context. '
-        f'If context is insufficient, state: "I couldn\'t find enough information in this course material to answer that accurately." '
-        f'Explanation level: {b.mode}. Cite sources as [Source N: Lecture Title].'
+        f"You are VertexLearn AI Copilot, an elite computer science tutor and interactive learning guide.\n"
+        f"Explanation Mode: {b.mode}.\n"
+        f"Your mission is to provide accurate, engaging, and thorough explanations.\n"
+        f"- Use everyday analogies to demystify complex architectures.\n"
+        f"- Contrast differences using structured markdown comparison tables where appropriate.\n"
+        f"- Provide clean, readable code snippets when relevant.\n"
+        f"- If course context is provided, integrate it and cite sources as [Source N: Title].\n"
+        f"- Always be encouraging and pedagogically structured."
     )
-    reply = generate(system, f'COURSE CONTEXT:\n{context}\n\nQUESTION:\n{b.question}')
+
+    note_prefix = ""
+    if cross_course and chunks:
+        primary_course = chunks[0].get('course_title', 'another course')
+        note_prefix = f"💡 *Curriculum Note: While this concept is formally taught in our **{primary_course}** course, here is a complete, clear breakdown for you:*\n\n"
+
+    user_prompt = f"STUDENT QUESTION:\n{b.question}\n\nCOURSE CONTEXT:\n{context_str}"
+    reply = generate(system, user_prompt)
+
+    if note_prefix and not reply.startswith("💡"):
+        reply = note_prefix + reply
+
+    sources = [
+        {
+            'lecture_id': x.get('lecture_id'),
+            'chunk_id': x.get('id'),
+            'title': f"{x.get('lecture_title', 'Lesson')} ({x.get('course_title', 'Course')})"
+        }
+        for x in (chunks if relevant else [])
+    ]
+
     return {
         'reply': reply,
         'mode': b.mode,
-        'sources': [
-            {
-                'lecture_id': x.get('lecture_id'),
-                'chunk_id': x.get('id'),
-                'title': x.get('lecture_title') or 'Course Material'
-            }
-            for x in chunks
-        ]
+        'sources': sources
     }

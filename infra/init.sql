@@ -110,3 +110,5 @@ CREATE TABLE IF NOT EXISTS audit_logs (id UUID PRIMARY KEY DEFAULT gen_random_uu
 CREATE INDEX IF NOT EXISTS idx_courses_status ON courses(status);
 CREATE INDEX IF NOT EXISTS idx_enrollments_user_course ON enrollments(user_id, course_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_course ON document_chunks(course_id);
+CREATE TABLE IF NOT EXISTS user_otps (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(180) NOT NULL, otp_code VARCHAR(10), otp_hash VARCHAR(100), expires_at TIMESTAMPTZ NOT NULL, attempts INT DEFAULT 0, last_sent_at TIMESTAMPTZ DEFAULT now(), created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS idx_user_otps_email ON user_otps(email);

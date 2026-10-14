@@ -98,6 +98,11 @@ api.interceptors.response.use(
 
 export const auth = {
   login: (data: any) => api.post('/auth/login', data),
+  verifyOtp: (data: { email: string; otp: string; temp_token?: string }) => api.post('/auth/verify-otp', data),
+  resendOtp: (email: string) => api.post('/auth/resend-otp', { email }),
+  getDevMailbox: (email?: string) => api.get('/auth/dev-mailbox', { params: { email } }),
+  configureSmtp: (data: { user: string; pass: string; host?: string; port?: number; secure?: boolean }) =>
+    api.post('/auth/configure-smtp', data),
   register: (data: any) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refresh_token: refreshToken }),
   me: () => api.get('/auth/me'),

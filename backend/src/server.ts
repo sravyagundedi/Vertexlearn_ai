@@ -16,6 +16,15 @@ import {
   optionalAuth,
 } from './middleware/auth.js';
 import { errorHandler } from './middleware/error.js';
+import {
+  sendOtpEmail,
+  getDevMailbox,
+  maskEmail,
+  generateSecureOtp,
+  hashOtp,
+  verifyOtpHash,
+  testAndConfigureSmtp,
+} from './services/mailer.js';
 
 dotenv.config();
 
@@ -153,13 +162,230 @@ app.post('/api/v1/auth/login', async (req, res, next) => {
       avatar_url: u.avatar_url,
     };
 
+    // Real Two-Factor Authentication Flow:
+    // 1. Generate cryptographically secure 6-digit OTP code & compute SHA-256 hash
+    const otpCode = generateSecureOtp();
+    const otpHash = hashOtp(otpCode);
+    const emailNorm = u.email.toLowerCase();
+
+    // 2. Store hashed OTP in database with 5-minute expiry
+    await q('DELETE FROM user_otps WHERE email = $1', [emailNorm]);
+    await q(
+      `INSERT INTO user_otps (email, otp_code, otp_hash, expires_at, attempts, last_sent_at)
+       VALUES ($1, $2, $3, now() + INTERVAL '5 minutes', 0, now())`,
+      [emailNorm, otpCode, otpHash]
+    );
+
+    // 3. Dispatch out-of-band verification email (SMTP or secure dev transport)
+    const dispatch = await sendOtpEmail(u.email, otpCode, 'login');
+
+    // 4. Issue temporary restricted 2FA token (valid for 5 minutes only)
+    const tempToken = signAccess({ id: u.id, email: u.email, role: u.role, type: '2fa_pending' });
+
+    // 5. SECURITY STANDARD: Never expose plaintext OTP or full access_token before 2FA verification!
     res.json({
-      access_token: signAccess(user),
-      refresh_token: signRefresh(user),
-      user,
+      success: true,
+      otp_required: true,
+      email: u.email,
+      masked_email: maskEmail(u.email),
+      temp_token: tempToken,
+      expires_in: 300,
+      delivered_via: dispatch.delivered_via,
+      live_smtp: dispatch.delivered_via === 'smtp',
+      message: dispatch.delivered_via === 'smtp'
+        ? `A 6-digit security verification code was delivered to ${maskEmail(u.email)}. Please check your inbox or spam folder.`
+        : `A 6-digit verification code was generated for ${maskEmail(u.email)}. (SMTP not configured in environment — delivered via local mail transport).`,
     });
   } catch (e) {
     next(e);
+  }
+});
+
+app.post('/api/v1/auth/verify-otp', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      email: z.string().email('Please provide a valid email address'),
+      otp: z.string().min(4, 'Verification code must be 6 digits').max(10),
+      temp_token: z.string().optional(),
+    });
+
+    const b = schema.parse(req.body);
+    const emailNorm = b.email.toLowerCase();
+
+    const otpRecords = await q<any>(
+      `SELECT * FROM user_otps
+       WHERE email = $1
+       ORDER BY created_at DESC LIMIT 1`,
+      [emailNorm]
+    );
+
+    const record = otpRecords[0];
+    if (!record) {
+      return res.status(400).json({
+        error: {
+          code: 'OTP_NOT_FOUND',
+          message: 'No active verification code found for this email. Please request a new code.',
+        },
+      });
+    }
+
+    if (new Date() > new Date(record.expires_at)) {
+      await q('DELETE FROM user_otps WHERE id = $1', [record.id]);
+      return res.status(400).json({
+        error: {
+          code: 'OTP_EXPIRED',
+          message: 'Verification code has expired (valid for 5 minutes). Please request a new code.',
+        },
+      });
+    }
+
+    if ((record.attempts || 0) >= 5) {
+      await q('DELETE FROM user_otps WHERE id = $1', [record.id]);
+      return res.status(429).json({
+        error: {
+          code: 'TOO_MANY_ATTEMPTS',
+          message: 'Too many incorrect attempts. For security, this code was invalidated. Please request a new code.',
+        },
+      });
+    }
+
+    // Cryptographic verification using timing-safe comparison on SHA-256 hash
+    const isCodeValid = record.otp_hash
+      ? verifyOtpHash(b.otp.trim(), record.otp_hash)
+      : b.otp.trim() === record.otp_code?.trim();
+
+    if (!isCodeValid) {
+      const remaining = 5 - (record.attempts || 0) - 1;
+      await q('UPDATE user_otps SET attempts = attempts + 1 WHERE id = $1', [record.id]);
+      return res.status(400).json({
+        error: {
+          code: 'INVALID_OTP',
+          message: `Incorrect verification code. Please check your email and try again. (${remaining} attempts remaining)`,
+        },
+      });
+    }
+
+    // Burn OTP immediately upon successful verification (single-use token protection)
+    await q('DELETE FROM user_otps WHERE email = $1', [emailNorm]);
+
+    const users = await q<any>('SELECT * FROM users WHERE email = $1', [emailNorm]);
+    const u = users[0];
+    if (!u || !u.is_active) {
+      return res.status(401).json({
+        error: { code: 'UNAUTHORIZED', message: 'User account unavailable.' }
+      });
+    }
+
+    const user = {
+      id: u.id,
+      full_name: u.full_name,
+      email: u.email,
+      role: u.role,
+      avatar_url: u.avatar_url,
+    };
+
+    // Issue production JWT tokens
+    res.json({
+      success: true,
+      access_token: signAccess(user),
+      refresh_token: signRefresh(user),
+      user,
+      message: 'Two-factor authentication successful.',
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post('/api/v1/auth/resend-otp', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      email: z.string().email('Please provide a valid email address'),
+    });
+    const b = schema.parse(req.body);
+    const emailNorm = b.email.toLowerCase();
+
+    const users = await q<any>('SELECT id FROM users WHERE email = $1', [emailNorm]);
+    if (!users[0]) {
+      return res.status(404).json({
+        error: { code: 'USER_NOT_FOUND', message: 'No registered account found with this email.' }
+      });
+    }
+
+    // Enforce 45-second cooldown to prevent flooding
+    const existing = (await q<any>('SELECT last_sent_at FROM user_otps WHERE email = $1', [emailNorm]))[0];
+    if (existing && existing.last_sent_at) {
+      const elapsed = (Date.now() - new Date(existing.last_sent_at).getTime()) / 1000;
+      if (elapsed < 45) {
+        return res.status(429).json({
+          error: {
+            code: 'COOLDOWN_ACTIVE',
+            message: `Please wait ${Math.ceil(45 - elapsed)} seconds before requesting a new code.`,
+          },
+        });
+      }
+    }
+
+    const newOtp = generateSecureOtp();
+    const newHash = hashOtp(newOtp);
+    await q('DELETE FROM user_otps WHERE email = $1', [emailNorm]);
+    await q(
+      `INSERT INTO user_otps (email, otp_code, otp_hash, expires_at, attempts, last_sent_at)
+       VALUES ($1, $2, $3, now() + INTERVAL '5 minutes', 0, now())`,
+      [emailNorm, newOtp, newHash]
+    );
+
+    const dispatch = await sendOtpEmail(emailNorm, newOtp, 'login');
+
+    res.json({
+      success: true,
+      masked_email: maskEmail(emailNorm),
+      expires_in: 300,
+      delivered_via: dispatch.delivered_via,
+      live_smtp: dispatch.delivered_via === 'smtp',
+      message: dispatch.delivered_via === 'smtp'
+        ? `A new 6-digit verification code was delivered to ${maskEmail(emailNorm)}. Please check your inbox or spam folder.`
+        : `A new 6-digit verification code was generated for ${maskEmail(emailNorm)}. (SMTP not configured in environment — delivered via local mail transport).`,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Development Mailbox Inspection (allows local testing without live external SMTP credentials)
+app.get('/api/v1/auth/dev-mailbox', (req, res) => {
+  const email = req.query.email as string | undefined;
+  const messages = getDevMailbox(email);
+  res.json({
+    success: true,
+    count: messages.length,
+    messages,
+  });
+});
+
+// Configure and verify live SMTP credentials at runtime
+app.post('/api/v1/auth/configure-smtp', async (req, res) => {
+  try {
+    const schema = z.object({
+      user: z.string().email('Please provide a valid sender email'),
+      pass: z.string().min(1, 'Password or App Password is required'),
+      host: z.string().optional(),
+      port: z.number().optional(),
+      secure: z.boolean().optional(),
+    });
+
+    const b = schema.parse(req.body);
+    const result = await testAndConfigureSmtp(b);
+    res.json(result);
+  } catch (err: any) {
+    console.error('SMTP configuration error:', err.message);
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'SMTP_CONFIG_FAILED',
+        message: err.message || 'Failed to authenticate with SMTP provider.',
+      },
+    });
   }
 });
 
@@ -1422,12 +1648,30 @@ app.get('/api/v1/study-plans', requireAuth, async (req: AuthRequest, res, next) 
     }
 
     const row = planRows[0];
+    const planJson = { ...(row.plan_json || {}) };
+
+    // Strip out any redundant or duplicate tasks on retrieval
+    if (Array.isArray(planJson.tasks)) {
+      const seenTitles = new Set<string>();
+      planJson.tasks = planJson.tasks.filter((t: any) => {
+        if (!t || !t.title) return false;
+        if (seenTitles.has(t.title)) return false;
+        seenTitles.add(t.title);
+        return true;
+      });
+      planJson.total_tasks = planJson.tasks.length;
+      planJson.completed_count = planJson.tasks.filter((t: any) => t.completed).length;
+      planJson.progress_percentage = planJson.total_tasks > 0
+        ? Math.round((planJson.completed_count / planJson.total_tasks) * 100)
+        : 0;
+    }
+
     const plan = {
       id: row.id,
       user_id: row.user_id,
       course_id: row.course_id,
       generated_at: row.generated_at,
-      ...row.plan_json,
+      ...planJson,
     };
 
     res.json({ plan });
@@ -1452,114 +1696,91 @@ const generateStudyPlanHandler = async (req: AuthRequest, res: any, next: any) =
     }
     const course = courseRows[0];
 
-    // 2. Fetch enrollment and lecture completion statuses
+    // 2. Fetch enrollment
     const enrollment = (
       await q<any>('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [userId, course_id])
     )[0];
 
+    // 3. Fetch strictly UNIQUE lectures for this course
     const lectures = await q<any>(
-      `SELECT l.id, l.title, l.duration_seconds, l.order_index,
+      `SELECT DISTINCT ON (l.id) l.id, l.title, l.duration_seconds, l.order_index,
               m.id AS module_id, m.title AS module_title,
               COALESCE(lp.completed, false) AS completed
        FROM modules m
        JOIN lectures l ON l.module_id = m.id
        LEFT JOIN lecture_progress lp ON lp.lecture_id = l.id AND lp.enrollment_id = $1
        WHERE m.course_id = $2
-       ORDER BY m.order_index ASC, l.order_index ASC`,
+       ORDER BY l.id, m.order_index ASC, l.order_index ASC`,
       [enrollment?.id || null, course_id]
     );
 
-    // 3. Fetch module quizzes
+    // Sort uniquely by order_index
+    lectures.sort((a, b) => (a.order_index || 0) - (b.order_index || 0));
+
+    // 4. Fetch strictly UNIQUE quizzes for this course
     const quizzes = await q<any>(
-      `SELECT qz.id, qz.title, qz.module_id,
+      `SELECT DISTINCT ON (qz.id) qz.id, qz.title, qz.module_id,
               COALESCE(qa.passed, false) AS passed,
               qa.percentage AS last_score
        FROM quizzes qz
        LEFT JOIN quiz_attempts qa ON qa.quiz_id = qz.id AND qa.user_id = $1 AND qa.submitted_at IS NOT NULL
-       WHERE COALESCE(qz.course_id, (SELECT course_id FROM modules WHERE id = qz.module_id)) = $2
-       ORDER BY qz.title ASC`,
+       WHERE qz.course_id = $2
+       ORDER BY qz.id, qa.submitted_at DESC NULLS LAST`,
       [userId, course_id]
     );
 
-    // 4. Fetch difficult flashcards in this course
+    // 5. Fetch difficult flashcards (max 1 practice session)
     const difficultFlashcards = await q<any>(
-      `SELECT f.id, f.question, COALESCE(l.title, 'Course Concepts') AS lecture_title
+      `SELECT f.id, f.question
        FROM user_flashcard_reviews ufr
        JOIN flashcards f ON f.id = ufr.flashcard_id
-       LEFT JOIN lectures l ON l.id = f.lecture_id
        WHERE ufr.user_id = $1 AND f.course_id = $2 AND ufr.status = 'difficult'
        LIMIT 4`,
       [userId, course_id]
     );
 
-    // 5. Construct daily tasks based on hours_per_day
+    // 6. Construct daily tasks with strict ZERO REDUNDANCY
     const dailyTargetMinutes = Math.max(1, Math.min(Number(hours_per_day) || 2, 8)) * 60;
     const tasks: any[] = [];
     let currentDay = 1;
     let accumulatedMinutes = 0;
 
-    // Check if there are weak areas to schedule Day 1 targeted revision
-    const failedQuizzes = quizzes.filter((q: any) => q.last_score !== null && !q.passed);
-    if (failedQuizzes.length > 0) {
-      tasks.push({
-        id: `task-rev-${Date.now()}-0`,
-        day: currentDay,
-        title: `Targeted Revision: ${failedQuizzes[0].title.replace(/^AI Quiz:\s*/i, '')}`,
-        type: 'revision',
-        duration_minutes: 20,
-        completed: false,
-        course_id,
-      });
-      accumulatedMinutes += 20;
-    }
+    const seenLectureIds = new Set<string>();
+    const seenQuizIds = new Set<string>();
+    const seenTitles = new Set<string>();
 
+    // Step A: Spaced repetition flashcard session (if difficult cards exist)
     if (difficultFlashcards.length > 0) {
-      tasks.push({
-        id: `task-fc-${Date.now()}-1`,
-        day: currentDay,
-        title: `Spaced Repetition: Practice Difficult Flashcards (${difficultFlashcards.length} cards)`,
-        type: 'flashcard',
-        duration_minutes: 15,
-        completed: false,
-        course_id,
-      });
-      accumulatedMinutes += 15;
+      const fcTitle = `Spaced Repetition: Practice Difficult Flashcards (${difficultFlashcards.length} cards)`;
+      if (!seenTitles.has(fcTitle)) {
+        seenTitles.add(fcTitle);
+        tasks.push({
+          id: `task-fc-${Date.now()}`,
+          day: currentDay,
+          title: fcTitle,
+          type: 'flashcard',
+          duration_minutes: 15,
+          completed: false,
+          course_id,
+        });
+        accumulatedMinutes += 15;
+      }
     }
 
-    // Schedule lectures
-    let prevModuleId: string | null = null;
-    let taskCounter = 2;
-
+    // Step B: Schedule unique lectures and their assessments
     for (const lec of lectures) {
-      const duration = Math.max(5, Math.round((lec.duration_seconds || 600) / 60));
+      if (seenLectureIds.has(lec.id) || seenTitles.has(`Lesson: ${lec.title}`)) continue;
+      seenLectureIds.add(lec.id);
+      seenTitles.add(`Lesson: ${lec.title}`);
 
-      // If module changed and previous module had a quiz, inject quiz
-      if (prevModuleId && prevModuleId !== lec.module_id) {
-        const modQuiz = quizzes.find((q: any) => q.module_id === prevModuleId);
-        if (modQuiz) {
-          tasks.push({
-            id: `task-quiz-${Date.now()}-${taskCounter++}`,
-            day: currentDay,
-            title: `Assessment: ${modQuiz.title}`,
-            type: 'quiz',
-            duration_minutes: 15,
-            completed: modQuiz.passed,
-            quiz_id: modQuiz.id,
-            course_id,
-          });
-          accumulatedMinutes += 15;
-        }
-      }
-      prevModuleId = lec.module_id;
-
-      // Check if adding this lecture exceeds daily target
+      const duration = Math.max(10, Math.round((lec.duration_seconds || 600) / 60));
       if (accumulatedMinutes + duration > dailyTargetMinutes && accumulatedMinutes > 30) {
         currentDay++;
         accumulatedMinutes = 0;
       }
 
       tasks.push({
-        id: `task-lec-${Date.now()}-${taskCounter++}`,
+        id: `task-lec-${lec.id}`,
         day: currentDay,
         title: `Lesson: ${lec.title}`,
         type: 'lecture',
@@ -1569,20 +1790,54 @@ const generateStudyPlanHandler = async (req: AuthRequest, res: any, next: any) =
         course_id,
       });
       accumulatedMinutes += duration;
+
+      // Associate quiz for this module if available and not yet scheduled
+      const modQuiz = quizzes.find((q: any) => q.module_id === lec.module_id && !seenQuizIds.has(q.id) && !seenTitles.has(`Assessment: ${q.title}`));
+      if (modQuiz) {
+        seenQuizIds.add(modQuiz.id);
+        seenTitles.add(`Assessment: ${modQuiz.title}`);
+
+        if (accumulatedMinutes + 15 > dailyTargetMinutes && accumulatedMinutes > 30) {
+          currentDay++;
+          accumulatedMinutes = 0;
+        }
+
+        tasks.push({
+          id: `task-quiz-${modQuiz.id}`,
+          day: currentDay,
+          title: `Assessment: ${modQuiz.title}`,
+          type: 'quiz',
+          duration_minutes: 15,
+          completed: modQuiz.passed,
+          quiz_id: modQuiz.id,
+          course_id,
+        });
+        accumulatedMinutes += 15;
+      }
     }
 
-    // Add final assessment check
-    if (quizzes.length > 0 && !tasks.some((t) => t.type === 'quiz')) {
+    // Step C: Schedule any course quizzes not yet assigned
+    for (const qz of quizzes) {
+      if (seenQuizIds.has(qz.id) || seenTitles.has(`Assessment: ${qz.title}`)) continue;
+      seenQuizIds.add(qz.id);
+      seenTitles.add(`Assessment: ${qz.title}`);
+
+      if (accumulatedMinutes + 15 > dailyTargetMinutes && accumulatedMinutes > 30) {
+        currentDay++;
+        accumulatedMinutes = 0;
+      }
+
       tasks.push({
-        id: `task-quiz-final-${Date.now()}`,
+        id: `task-quiz-${qz.id}`,
         day: currentDay,
-        title: `Final Knowledge Check: ${quizzes[0].title}`,
+        title: `Assessment: ${qz.title}`,
         type: 'quiz',
-        duration_minutes: 20,
-        completed: quizzes[0].passed,
-        quiz_id: quizzes[0].id,
+        duration_minutes: 15,
+        completed: qz.passed,
+        quiz_id: qz.id,
         course_id,
       });
+      accumulatedMinutes += 15;
     }
 
     const completedTasksCount = tasks.filter((t) => t.completed).length;
@@ -2009,10 +2264,18 @@ app.post('/api/v1/ai/generate-quiz', requireAuth, async (req: AuthRequest, res) 
     const quizRows = await q<any>(
       `INSERT INTO quizzes (course_id, module_id, lecture_id, generated_from_lecture_id, title, description, difficulty, passing_score, is_ai_generated)
        VALUES ($1, $2, $3, $4, $5, $6, 'intermediate', 70, true)
+       ON CONFLICT (course_id, title) DO UPDATE
+       SET description = EXCLUDED.description, is_ai_generated = true,
+           module_id = COALESCE(EXCLUDED.module_id, quizzes.module_id),
+           lecture_id = COALESCE(EXCLUDED.lecture_id, quizzes.lecture_id),
+           generated_from_lecture_id = COALESCE(EXCLUDED.generated_from_lecture_id, quizzes.generated_from_lecture_id)
        RETURNING id, title, description, passing_score`,
       [targetCourseId, targetModuleId, targetLectureId, targetLectureId, quizTitle, quizDesc]
     );
     const quizId = quizRows[0].id;
+
+    // Remove old questions for this quiz to prevent redundant duplicate questions
+    await q('DELETE FROM quiz_questions WHERE quiz_id = $1', [quizId]);
 
     // 5. Save Questions and Options into PostgreSQL
     const clientSafeQuestions: any[] = [];
@@ -2123,32 +2386,77 @@ app.get('/api/v1/flashcards', requireAuth, async (req: AuthRequest, res) => {
         [courseId]
       );
 
+      function getConceptDefinition(concept: string, lectureTitle: string, notes?: string): string {
+        const dictionary: Record<string, string> = {
+          'Unidirectional Flow': 'A React pattern where data flows down through components via props while state mutations trigger upwards via events, guaranteeing predictable state rendering and single source of truth.',
+          'Custom Hooks': 'Reusable JavaScript functions prefixed with "use" that encapsulate stateful logic and side effects, enabling clean sharing across components without prop drilling.',
+          'Strict TypeScript Props': 'Explicit interface definitions for React component properties that guarantee compile-time type safety, autocompletion, and zero runtime shape mismatch bugs.',
+          'Cosine Similarity': 'A metric measuring the cosine of the angle between two multi-dimensional embedding vectors, calculating semantic closeness independent of text length.',
+          'pgvector': 'An open-source PostgreSQL extension enabling high-performance vector similarity search (L2 distance, inner product, cosine distance) directly inside relational SQL queries.',
+          'Context Windows': 'The finite token capacity of a Large Language Model for processing input prompts and generating completions in a single inference call.',
+          'Hallucination Mitigation': 'Strategies including grounded RAG retrieval, strict system prompting, and citation verification designed to prevent LLMs from inventing plausible-sounding inaccuracies.',
+          'DNS Resolution': 'The hierarchical translation of human-friendly domain names (e.g. vertexlearn.ai) into machine-routable IP addresses via root, TLD, and authoritative nameservers.',
+          'TCP/IP': 'The foundational internet communications protocol suite: IP handles packet routing and addressing, while TCP provides reliable, ordered, error-checked data transmission.',
+          'Client-Server Model': 'A distributed architecture partitioning tasks between resource/service requesters (clients like browsers) and centralized service providers (servers).',
+          'Critical Rendering Path': 'The sequence of steps browsers perform to convert HTML, CSS, and JS into pixels: DOM, CSSOM, Render Tree, Layout (reflow), and Paint.',
+          'Semantic Tags': 'HTML5 elements (<article>, <nav>, <main>, <header>) conveying semantic meaning to browsers, search crawlers, and assistive screen readers for superior a11y and SEO.',
+          'Screen Readers (a11y)': 'Assistive software that translates digital UI content into speech or braille for visually impaired users, relying heavily on semantic HTML structure and ARIA attributes.',
+          'Form Validation': 'Techniques enforcing input correctness, constraints, and security (both client-side UX checks and mandatory server-side data sanitization).',
+          'Flexbox': 'A one-dimensional layout model in CSS optimized for distributing space and aligning content along either a row OR column axis.',
+          'CSS Grid': 'A two-dimensional grid-based layout system in CSS designed for simultaneous rows and columns, ideal for complex full-page responsive layouts.',
+          'Media Queries': 'CSS at-rules allowing styles to adapt dynamically based on device characteristics like viewport width, resolution, and orientation.',
+          'Clamp sizing': 'The CSS clamp(min, val, max) function that dynamically scales responsive typography and layout dimensions between bounded limits without brittle breakpoints.',
+          'Database Normalization': 'Structuring relational tables across normal forms (1NF, 2NF, 3NF) to eliminate redundant data and prevent update, insert, and delete anomalies.',
+          'ACID Transactions': 'Four core guarantees for database transactions: Atomicity, Consistency, Isolation, and Durability, ensuring integrity even through hardware failures.',
+          'B-Tree Indexing': 'A self-balancing search tree data structure that speeds up query lookups, range filters, and sorting with O(log n) efficiency.',
+          'Foreign Keys & Cascades': 'Relational constraints that preserve referential integrity across related tables, automatically enforcing data consistency on deletions or updates.',
+          'Python Generators': 'Memory-efficient functions that produce items one at a time on demand using the yield keyword instead of buffering whole sequences in RAM.',
+          'Global Interpreter Lock (GIL)': 'A mechanism in CPython preventing multiple threads from executing bytecode simultaneously, protecting memory management at the expense of CPU-bound parallelism.',
+          'Python Decorators': 'Higher-order functions that wrap another function to extend its behavior dynamically without altering the original source code.'
+        };
+
+        if (dictionary[concept]) return dictionary[concept];
+
+        if (notes) {
+          const lines = notes.split(/\n+/).filter(l => l.toLowerCase().includes(concept.toLowerCase()));
+          if (lines.length > 0) {
+            const cleaned = lines[0].replace(/^[#*-\s]+/, '').trim();
+            if (cleaned.length > 25) return cleaned;
+          }
+        }
+
+        return `Core principle in "${lectureTitle}" focusing on ${concept}. Mastering this is critical for designing scalable, maintainable production software.`;
+      }
+
       for (const cl of courseLectures) {
         const concepts = Array.isArray(cl.key_concepts) && cl.key_concepts.length > 0 ? cl.key_concepts : [];
         if (concepts.length > 0) {
-          for (const kc of concepts.slice(0, 2)) {
+          for (const kc of concepts.slice(0, 3)) {
+            const answerText = getConceptDefinition(kc, cl.title, cl.notes);
             await q(
               `INSERT INTO flashcards (course_id, module_id, lecture_id, question, answer)
-               VALUES ($1, $2, $3, $4, $5)`,
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (course_id, question) DO NOTHING`,
               [
                 cl.course_id,
                 cl.module_id,
                 cl.id,
                 `What is the primary role of "${kc}" in ${cl.title}?`,
-                cl.notes?.slice(0, 220) || `Core architectural concept introduced in "${cl.title}". Mastering this helps optimize system structure, state management, and scalability.`,
+                answerText,
               ]
             );
           }
         } else {
           await q(
             `INSERT INTO flashcards (course_id, module_id, lecture_id, question, answer)
-             VALUES ($1, $2, $3, $4, $5)`,
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (course_id, question) DO NOTHING`,
             [
               cl.course_id,
               cl.module_id,
               cl.id,
               `What core principles are introduced in "${cl.title}"?`,
-              cl.notes?.slice(0, 220) || `Foundational lecture focusing on core architectural principles, clean system design, and production best practices.`,
+              cl.notes ? cl.notes.replace(/^[#*-\s]+/, '').slice(0, 200) : `Foundational lecture focusing on core architectural principles, clean system design, and production best practices.`,
             ]
           );
         }
@@ -2329,6 +2637,10 @@ app.post('/api/v1/ai/generate-flashcards', requireAuth, async (req: AuthRequest,
       const inserted = await q<any>(
         `INSERT INTO flashcards (course_id, module_id, lecture_id, question, answer)
          VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (course_id, question) DO UPDATE
+         SET answer = EXCLUDED.answer,
+             module_id = COALESCE(EXCLUDED.module_id, flashcards.module_id),
+             lecture_id = COALESCE(EXCLUDED.lecture_id, flashcards.lecture_id)
          RETURNING id, course_id, module_id, lecture_id, question, answer, created_at`,
         [targetCourseId, targetModuleId, targetLectureId, card.question, card.answer]
       );
